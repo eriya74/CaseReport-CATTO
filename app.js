@@ -226,20 +226,20 @@ CRITICAL REQUIREMENT: You MUST include up to 20 papers in "quick_lit_check" arra
 For EVERY paper you cite in your "reasoning", that paper MUST appear in the "quick_lit_check" array.
 DO NOT reference any PMID in "reasoning" that is not listed in "quick_lit_check".
 
-IMPORTANT: Use the EXACT PMID numbers from the papers above. Do NOT make up placeholder PMIDs like "PMID 1", "PMID 2", etc.
-For example, if the paper shows "PMID: 39803014", you MUST use "39803014" in the quick_lit_check.
-Include the DOI field if available in the paper data.
+IMPORTANT: Use the ACTUAL PMID numbers (e.g., 39803014) from the retrieved papers list. 
+DO NOT use indices like "PMID 1" or placeholders like "Title-PMID 3".
+ALWAYS use the format "Title (PMID: 12345678)" in the reasoning text.
 
 OUTPUT JSON FORMAT:
 {
   "max_level_found": 0-4,
   "judgement": "High" | "Moderate" | "Low",
-  "reasoning": "Explain why this level was chosen. When citing papers, use format (Title-PMID X) where X is the position in quick_lit_check array below (1-20). Only cite papers that appear in quick_lit_check.",
+  "reasoning": "Explain why this level was chosen. When citing papers, YOU MUST USE the format 'Paper Title (PMID: 12345678)'. Do not use 'PMID 1' or 'Paper 1'. Use the actual IDs.",
   "quick_lit_check": [
     {
-      "pmid": "actual PMID number from the papers list above",
+      "pmid": "actual PMID number (e.g., 39803014) from the papers list above",
       "doi": "DOI if available, otherwise empty string",
-      "title": "...",
+      "title": "Exact title from the paper list",
       "matched_elements": "...",
       "unmatched_elements": "...",
       "difference": "..."
@@ -272,10 +272,11 @@ PREVIOUS ANALYSIS TO VERIFY:
 ${JSON.stringify(evalJson, null, 2)}
 
 CRITICAL VERIFICATION TASKS:
-1. Check that every PMID in "quick_lit_check" exists in the RETRIEVED PAPERS list above
-2. Verify that the title for each PMID matches EXACTLY with the retrieved paper
-3. Confirm that matched_elements, unmatched_elements, and difference are accurate based on the paper's abstract
-4. If you find any errors, correct them
+1. Check that every PMID in "quick_lit_check" exists in the RETRIEVED PAPERS list above.
+2. Verify that the title for each PMID matches EXACTLY with the retrieved paper.
+3. Confirm that matched_elements, unmatched_elements, and difference are accurate based on the paper's abstract.
+4. Ensure "reasoning" uses ACTUAL PMIDs (e.g., "Title (PMID: 12345678)") and NOT placeholders like "PMID 1".
+5. If you find any errors (hallucinated PMIDs, wrong titles, placeholders), CORRECT them in the output.
 
 OUTPUT the corrected JSON in the same format:
 {
