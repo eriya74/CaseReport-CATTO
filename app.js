@@ -29,6 +29,24 @@ window.saveApiKey = function () {
     document.getElementById('apiKeyStatus').style.color = 'var(--secondary)';
 };
 
+// Helper to extract JSON from markdown text
+function extractJson(text) {
+    try {
+        // Find JSON block
+        const startIndex = text.indexOf('{');
+        const endIndex = text.lastIndexOf('}');
+        if (startIndex === -1 || endIndex === -1) {
+            throw new Error('No JSON object found in response');
+        }
+        const jsonStr = text.substring(startIndex, endIndex + 1);
+        return JSON.parse(jsonStr);
+    } catch (e) {
+        console.error('JSON Parse Failed:', e);
+        console.error('Raw Text:', text);
+        throw new Error('AIの応答を解析できませんでした。もう一度お試しください。');
+    }
+}
+
 // PubMed Search Functions
 async function searchPubMed(query, retmax = 20) {
     const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=${retmax}&retmode=json`;
@@ -162,7 +180,7 @@ OUTPUT JSON FORMAT:
         console.log('Step 1-3: Generating queries...');
         const preResult = await model.generateContent(prePrompt);
         const preText = preResult.response.text();
-        const preJson = JSON.parse(preText.replace(/```json/g, '').replace(/```/g, '').trim());
+        const preJson = extractJson(preText);
 
         // Execute PubMed Search
         console.log('Searching PubMed...');
@@ -239,7 +257,7 @@ IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (
         console.log('Step 4-6: Evaluating novelty (First Pass)...');
         const evalResult = await model.generateContent(evalPrompt);
         const evalText = evalResult.response.text();
-        const evalJson = JSON.parse(evalText.replace(/```json/g, '').replace(/```/g, '').trim());
+        const evalJson = extractJson(evalText);
 
         // Second verification pass to reduce hallucinations
         console.log('Verification Pass: Re-checking literature analysis...');
@@ -282,7 +300,7 @@ IMPORTANT: Only include papers that actually exist in the RETRIEVED PAPERS list.
 
         const verifyResult = await model.generateContent(verifyPrompt);
         const verifyText = verifyResult.response.text();
-        const verifiedJson = JSON.parse(verifyText.replace(/```json/g, '').replace(/```/g, '').trim());
+        const verifiedJson = extractJson(verifyText);
 
         // Cross-validate against actual PubMed data
         console.log('Cross-validating against PubMed data...');
