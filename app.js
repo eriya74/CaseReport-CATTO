@@ -338,4 +338,3 @@ ${JSON.stringify(result.search_core, null, 2)}
     results.style.display = 'block';
     results.scrollIntoView({ behavior: 'smooth' });
 }
-```
