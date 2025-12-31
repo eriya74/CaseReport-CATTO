@@ -15,7 +15,25 @@
             <p class="subtitle">Anesthesia Case Report Screening AI</p>
         </header>
 
-        <section class="glass-panel">
+        <!-- API Key Section -->
+        <section class="glass-panel" id="apiKeySection">
+            <h3>🔑 Gemini API Key</h3>
+            <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1rem;">
+                このアプリケーションを使用するには、Google Gemini APIキーが必要です。
+                <a href="https://aistudio.google.com/apikey" target="_blank"
+                    style="color: var(--secondary);">こちら</a>から取得できます。
+            </p>
+            <div style="display: flex; gap: 1rem; align-items: flex-end;">
+                <div style="flex: 1;">
+                    <label for="apiKeyInput">APIキーを入力</label>
+                    <input type="password" id="apiKeyInput" placeholder="AIzaSy...">
+                </div>
+                <button onclick="saveApiKey()" class="btn btn-primary">保存</button>
+            </div>
+            <p id="apiKeyStatus" style="margin-top: 0.5rem; font-size: 0.85rem;"></p>
+        </section>
+
+        <section class="glass-panel" id="formSection" style="display:none;">
             <form id="cattoForm" class="grid">
 
                 <!-- Email -->
@@ -33,14 +51,11 @@
                 </div>
 
                 <div class="grid-2">
-                    <!-- B. Condition -->
                     <div>
                         <label for="condition_event">B. Condition / Event</label>
                         <input type="text" id="condition_event" name="condition_event"
                             placeholder="Medical term & synonyms" required>
                     </div>
-
-                    <!-- C. Anatomy -->
                     <div>
                         <label for="anatomy">C. Anatomy</label>
                         <input type="text" id="anatomy" name="anatomy" placeholder="Site, Side, Related structures"
@@ -49,14 +64,11 @@
                 </div>
 
                 <div class="grid-2">
-                    <!-- D. Trigger -->
                     <div>
                         <label for="trigger_exposure">D. Trigger / Exposure</label>
                         <input type="text" id="trigger_exposure" name="trigger_exposure"
                             placeholder="Procedure, Drug, Device" required>
                     </div>
-
-                    <!-- E. Timing -->
                     <div>
                         <label for="timing">E. Timing</label>
                         <input type="text" id="timing" name="timing" placeholder="Intra-op phase, Post-op day X"
@@ -65,14 +77,11 @@
                 </div>
 
                 <div class="grid-2">
-                    <!-- F. Host Factors -->
                     <div>
                         <label for="host_factors">F. Host Factors</label>
                         <textarea id="host_factors" name="host_factors" rows="3"
                             placeholder="Age, Comorbidities, Genetics..."></textarea>
                     </div>
-
-                    <!-- G. Key Findings -->
                     <div>
                         <label for="key_findings">G. Key Findings</label>
                         <textarea id="key_findings" name="key_findings" rows="3"
@@ -80,14 +89,12 @@
                     </div>
                 </div>
 
-                <!-- H. Management -->
                 <div>
                     <label for="management_outcome">H. Management / Outcome</label>
                     <textarea id="management_outcome" name="management_outcome" rows="2"
                         placeholder="Intervention & Outcome"></textarea>
                 </div>
 
-                <!-- I. Novelty -->
                 <div>
                     <label for="novelty_differences">I. Novelty / Differences</label>
                     <textarea id="novelty_differences" name="novelty_differences" rows="3"
@@ -95,7 +102,7 @@
                 </div>
 
                 <div class="submit-section">
-                    <button type="submit" class="btn btn-primary">
+                    <button type="submit" class="btn btn-primary" id="analyzeBtn">
                         <span id="btnText">Analyze & Send Report</span>
                         <span id="spinner" class="loading-spinner" style="display:none;"></span>
                     </button>
@@ -109,12 +116,6 @@
                             <li>• Level 1 のみ／未一致(論文までいけそう) → ≥85%</li>
                         </ul>
                     </div>
-
-                    <div id="serverNote" class="warning-box">
-                        <p><strong>⚠️ Note:</strong> This is a static demo. For full analysis functionality (PubMed
-                            search, AI evaluation), please run the application locally with <code>npm run dev</code>.
-                        </p>
-                    </div>
                 </div>
 
             </form>
@@ -127,59 +128,23 @@
             <div style="text-align: center; margin-bottom: 1rem;">
                 <span id="judgementBadge" class="badge">-- Priority</span>
             </div>
+
+            <details class="info-box" style="margin-bottom: 1rem;">
+                <summary style="cursor: pointer; font-weight: bold;">Step 1: Reconstructed CATTO</summary>
+                <pre id="reconstructedCatto"
+                    style="white-space: pre-wrap; font-size: 0.85rem; margin-top: 0.5rem;"></pre>
+            </details>
+
+            <details class="info-box" style="margin-bottom: 1rem;">
+                <summary style="cursor: pointer; font-weight: bold;">Step 2: Search Core</summary>
+                <pre id="searchCore" style="white-space: pre-wrap; font-size: 0.85rem; margin-top: 0.5rem;"></pre>
+            </details>
+
             <div id="resultContent"></div>
         </section>
     </div>
 
-    <script>
-        document.getElementById('cattoForm').addEventListener('submit', function (e) {
-            e.preventDefault();
-
-            const btn = document.querySelector('.btn-primary');
-            const btnText = document.getElementById('btnText');
-            const spinner = document.getElementById('spinner');
-            const results = document.getElementById('results');
-
-            // Show loading state
-            btnText.textContent = 'Analyzing...';
-            spinner.style.display = 'inline-block';
-            btn.disabled = true;
-
-            // Simulate analysis (since we don't have a backend on GitHub Pages)
-            setTimeout(() => {
-                // Show demo results
-                document.getElementById('scoreValue').textContent = '75';
-                document.getElementById('judgementBadge').textContent = 'Moderate Priority';
-                document.getElementById('judgementBadge').style.background = 'rgba(251, 191, 36, 0.2)';
-                document.getElementById('judgementBadge').style.color = '#fbbf24';
-
-                document.getElementById('resultContent').innerHTML = `
-                    <div style="margin-bottom: 1.5rem;">
-                        <h3>Analysis (Demo)</h3>
-                        <p>This is a demonstration. For real analysis with PubMed search and AI evaluation, please run the full application locally.</p>
-                    </div>
-                    <div class="info-box">
-                        <h4>To use the full application:</h4>
-                        <ol style="margin-left: 1.5rem;">
-                            <li>Clone the repository: <code>git clone https://github.com/eriya74/CaseReport-CATTO.git</code></li>
-                            <li>Install dependencies: <code>npm install</code></li>
-                            <li>Set up your API keys in <code>.env.local</code></li>
-                            <li>Run: <code>npm run dev</code></li>
-                            <li>Open: <code>http://localhost:3000</code></li>
-                        </ol>
-                    </div>
-                `;
-
-                results.style.display = 'block';
-                results.scrollIntoView({ behavior: 'smooth' });
-
-                // Reset button
-                btnText.textContent = 'Analyze & Send Report';
-                spinner.style.display = 'none';
-                btn.disabled = false;
-            }, 2000);
-        });
-    </script>
+    <script type="module" src="app.js"></script>
 </body>
 
 </html>
