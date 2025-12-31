@@ -192,12 +192,15 @@ Determine the "max_level_found" (integer 0-4) based on the highest match found i
 (0 means no matches found).
 
 STEP 6: Quick Literature Check
+CRITICAL REQUIREMENT: You MUST include up to 20 papers in "quick_lit_check" array.
+For EVERY paper you cite in your "reasoning", that paper MUST appear in the "quick_lit_check" array.
+DO NOT reference any PMID in "reasoning" that is not listed in "quick_lit_check".
 
 OUTPUT JSON FORMAT:
 {
   "max_level_found": 0-4,
   "judgement": "High" | "Moderate" | "Low",
-  "reasoning": "Explain why this level was chosen based on the papers...",
+  "reasoning": "Explain why this level was chosen. When citing papers, use format (Title-PMID X) where X is the position in quick_lit_check array below (1-20). Only cite papers that appear in quick_lit_check.",
   "quick_lit_check": [
     {
       "pmid": "...",
@@ -206,11 +209,14 @@ OUTPUT JSON FORMAT:
       "unmatched_elements": "...",
       "difference": "..."
     }
+    // Include up to 20 most relevant papers here
   ],
   "representative_citations": [
       { "pmid": "...", "title": "...", "year": "..." }
   ]
 }
+
+IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (up to 20). Every PMID you mention in "reasoning" MUST be in this array.
 `;
 
         console.log('Step 4-6: Evaluating novelty...');
