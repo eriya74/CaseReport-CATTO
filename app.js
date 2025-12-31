@@ -236,10 +236,84 @@ OUTPUT JSON FORMAT:
 IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (up to 20). Every PMID you mention in "reasoning" MUST be in this array. Use EXACT PMIDs from the retrieved papers.
 `;
 
-        console.log('Step 4-6: Evaluating novelty...');
+        console.log('Step 4-6: Evaluating novelty (First Pass)...');
         const evalResult = await model.generateContent(evalPrompt);
         const evalText = evalResult.response.text();
         const evalJson = JSON.parse(evalText.replace(/```json/g, '').replace(/```/g, '').trim());
+
+        // Second verification pass to reduce hallucinations
+        console.log('Verification Pass: Re-checking literature analysis...');
+        const verifyPrompt = `
+You are an expert Anesthesiologist performing a VERIFICATION check.
+Review the following analysis and verify its accuracy against the retrieved papers.
+
+RETRIEVED PAPERS:
+${papersText}
+
+PREVIOUS ANALYSIS TO VERIFY:
+${JSON.stringify(evalJson, null, 2)}
+
+CRITICAL VERIFICATION TASKS:
+1. Check that every PMID in "quick_lit_check" exists in the RETRIEVED PAPERS list above
+2. Verify that the title for each PMID matches EXACTLY with the retrieved paper
+3. Confirm that matched_elements, unmatched_elements, and difference are accurate based on the paper's abstract
+4. If you find any errors, correct them
+
+OUTPUT the corrected JSON in the same format:
+{
+  "max_level_found": 0-4,
+  "judgement": "High" | "Moderate" | "Low",
+  "reasoning": "...",
+  "quick_lit_check": [
+    {
+      "pmid": "exact PMID from papers",
+      "doi": "exact DOI from papers or empty string",
+      "title": "exact title from papers",
+      "matched_elements": "...",
+      "unmatched_elements": "...",
+      "difference": "..."
+    }
+  ],
+  "representative_citations": [...]
+}
+
+IMPORTANT: Only include papers that actually exist in the RETRIEVED PAPERS list. Do not make up or hallucinate any information.
+`;
+
+        const verifyResult = await model.generateContent(verifyPrompt);
+        const verifyText = verifyResult.response.text();
+        const verifiedJson = JSON.parse(verifyText.replace(/```json/g, '').replace(/```/g, '').trim());
+
+        // Cross-validate against actual PubMed data
+        console.log('Cross-validating against PubMed data...');
+        const validatedLitCheck = [];
+
+        if (verifiedJson.quick_lit_check && verifiedJson.quick_lit_check.length > 0) {
+            for (const cite of verifiedJson.quick_lit_check) {
+                // Find matching paper in our retrieved data
+                const matchedPaper = papers.find(p => p.pmid === cite.pmid);
+
+                if (matchedPaper) {
+                    // Use actual data from PubMed, keep AI's analysis
+                    validatedLitCheck.push({
+                        pmid: matchedPaper.pmid,  // Guaranteed correct
+                        doi: matchedPaper.doi || '',  // Guaranteed correct
+                        title: matchedPaper.title,  // Guaranteed correct
+                        matched_elements: cite.matched_elements,
+                        unmatched_elements: cite.unmatched_elements,
+                        difference: cite.difference
+                    });
+                } else {
+                    console.warn(`PMID ${cite.pmid} not found in retrieved papers - skipping (hallucination detected)`);
+                }
+            }
+        }
+
+        // Use verified data with validated literature check
+        const finalEvalJson = {
+            ...verifiedJson,
+            quick_lit_check: validatedLitCheck
+        };
 
         // Deterministic Score Calculation
         // Level 4 (Many reports) -> <= 20%
@@ -247,7 +321,7 @@ IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (
         // Level 2 (Few reports) -> 60-80%
         // Level 1/0 (Novel) -> >= 85%
         let calcScore = 0;
-        const maxLevel = evalJson.max_level_found;
+        const maxLevel = finalEvalJson.max_level_found;
 
         if (maxLevel >= 4) {
             calcScore = 15;
@@ -262,7 +336,7 @@ IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (
         // Force consistency
         const finalResult = {
             ...preJson,
-            ...evalJson,
+            ...finalEvalJson,
             novelty_score: calcScore
         };
 
