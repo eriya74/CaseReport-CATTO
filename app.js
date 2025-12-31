@@ -57,7 +57,17 @@ async function fetchPubMedDetails(pmids) {
             const journal = article.querySelector('Journal Title')?.textContent || '';
             const year = article.querySelector('PubDate Year')?.textContent || 'N/A';
 
-            return { pmid, title, abstract, journal, year };
+            // Extract DOI
+            let doi = '';
+            const articleIds = article.querySelectorAll('ArticleId');
+            for (const id of articleIds) {
+                if (id.getAttribute('IdType') === 'doi') {
+                    doi = id.textContent;
+                    break;
+                }
+            }
+
+            return { pmid, title, abstract, journal, year, doi };
         } catch (e) {
             return null;
         }
@@ -166,7 +176,9 @@ OUTPUT JSON FORMAT:
 
         // Step 4-6: Evaluation
         const papersText = papers.map((p, i) =>
-            `[${i + 1}] PMID:${p.pmid} Title: ${p.title} Abstract: ${p.abstract}`
+            `[${i + 1}] PMID: ${p.pmid}${p.doi ? ` | DOI: ${p.doi}` : ''}
+Title: ${p.title}
+Abstract: ${p.abstract}`
         ).join('\n\n');
 
         const evalPrompt = `
@@ -196,6 +208,10 @@ CRITICAL REQUIREMENT: You MUST include up to 20 papers in "quick_lit_check" arra
 For EVERY paper you cite in your "reasoning", that paper MUST appear in the "quick_lit_check" array.
 DO NOT reference any PMID in "reasoning" that is not listed in "quick_lit_check".
 
+IMPORTANT: Use the EXACT PMID numbers from the papers above. Do NOT make up placeholder PMIDs like "PMID 1", "PMID 2", etc.
+For example, if the paper shows "PMID: 39803014", you MUST use "39803014" in the quick_lit_check.
+Include the DOI field if available in the paper data.
+
 OUTPUT JSON FORMAT:
 {
   "max_level_found": 0-4,
@@ -203,7 +219,8 @@ OUTPUT JSON FORMAT:
   "reasoning": "Explain why this level was chosen. When citing papers, use format (Title-PMID X) where X is the position in quick_lit_check array below (1-20). Only cite papers that appear in quick_lit_check.",
   "quick_lit_check": [
     {
-      "pmid": "...",
+      "pmid": "actual PMID number from the papers list above",
+      "doi": "DOI if available, otherwise empty string",
       "title": "...",
       "matched_elements": "...",
       "unmatched_elements": "...",
@@ -212,11 +229,11 @@ OUTPUT JSON FORMAT:
     // Include up to 20 most relevant papers here
   ],
   "representative_citations": [
-      { "pmid": "...", "title": "...", "year": "..." }
+      { "pmid": "actual PMID", "title": "...", "year": "..." }
   ]
 }
 
-IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (up to 20). Every PMID you mention in "reasoning" MUST be in this array.
+IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (up to 20). Every PMID you mention in "reasoning" MUST be in this array. Use EXACT PMIDs from the retrieved papers.
 `;
 
         console.log('Step 4-6: Evaluating novelty...');
@@ -287,9 +304,13 @@ function displayResults(result, formData) {
     let litCheckEmailText = '';
     if (result.quick_lit_check && result.quick_lit_check.length > 0) {
         result.quick_lit_check.forEach((cite, idx) => {
+            const doiDisplay = cite.doi ? ` | DOI: ${cite.doi}` : '';
             litCheckHtml += `
                 <li style="margin-bottom: 0.75rem; padding: 0.75rem; background: rgba(0,0,0,0.2); border-radius: 8px;">
-                    <div style="font-weight: bold;">${cite.title} (PMID: ${cite.pmid})</div>
+                    <div style="font-weight: bold;">${cite.title}</div>
+                    <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">
+                       PMID: ${cite.pmid}${doiDisplay}
+                    </div>
                     <div style="font-size: 0.9rem; margin-top: 0.5rem;">
                        <strong>Matched:</strong> ${cite.matched_elements}<br/>
                        <strong>Unmatched:</strong> ${cite.unmatched_elements}<br/>
@@ -299,7 +320,7 @@ function displayResults(result, formData) {
             `;
             litCheckEmailText += `
 [${idx + 1}] ${cite.title}
-    PMID: ${cite.pmid}
+    PMID: ${cite.pmid}${cite.doi ? `\n    DOI: ${cite.doi}` : ''}
     Matched Elements: ${cite.matched_elements}
     Unmatched Elements: ${cite.unmatched_elements}
     Difference: ${cite.difference}
