@@ -181,15 +181,23 @@ RETRIEVED PAPERS (Top 20):
 ${papersText}
 
 STEP 4: CATTO Level Evaluation
-STEP 5: Novelty Score Calculation (0-100)
+Evaluate EACH paper's match level (1-4).
+- Level 1: Condition/Event matches
+- Level 2: + Anatomy matches
+- Level 3: + Trigger/Exposure matches
+- Level 4: + Timing matches
+
+STEP 5: Novelty Assessment
+Determine the "max_level_found" (integer 0-4) based on the highest match found in literature.
+(0 means no matches found).
+
 STEP 6: Quick Literature Check
 
 OUTPUT JSON FORMAT:
 {
-  "max_level_found": 1-4,
-  "novelty_score": 0-100,
+  "max_level_found": 0-4,
   "judgement": "High" | "Moderate" | "Low",
-  "reasoning": "...",
+  "reasoning": "Explain why this level was chosen based on the papers...",
   "quick_lit_check": [
     {
       "pmid": "...",
@@ -210,11 +218,33 @@ OUTPUT JSON FORMAT:
         const evalText = evalResult.response.text();
         const evalJson = JSON.parse(evalText.replace(/```json/g, '').replace(/```/g, '').trim());
 
-        // Combine results
-        const finalResult = { ...preJson, ...evalJson };
+        // Deterministic Score Calculation
+        // Level 4 (Many reports) -> <= 20%
+        // Level 3 (Some reports) -> 30-50%
+        // Level 2 (Few reports) -> 60-80%
+        // Level 1/0 (Novel) -> >= 85%
+        let calcScore = 0;
+        const maxLevel = evalJson.max_level_found;
+
+        if (maxLevel >= 4) {
+            calcScore = 15;
+        } else if (maxLevel === 3) {
+            calcScore = 40;
+        } else if (maxLevel === 2) {
+            calcScore = 70;
+        } else { // maxLevel is 0 or 1
+            calcScore = 90;
+        }
+
+        // Force consistency
+        const finalResult = {
+            ...preJson,
+            ...evalJson,
+            novelty_score: calcScore
+        };
 
         // Display results
-        displayResults(finalResult);
+        displayResults(finalResult, formData.submitter_email);
 
     } catch (error) {
         console.error('Analysis Error:', error);
@@ -226,7 +256,7 @@ OUTPUT JSON FORMAT:
     }
 });
 
-function displayResults(result) {
+function displayResults(result, email) {
     const results = document.getElementById('results');
 
     document.getElementById('scoreValue').textContent = result.novelty_score;
@@ -266,14 +296,46 @@ function displayResults(result) {
     }
     litCheckHtml += '</ul>';
 
+    // Create Email Body
+    const emailSubject = `Case Report Screening Result: ${result.judgement} Priority`;
+    const emailBody = `
+Case Report Analysis Results
+----------------------------
+Judgement: ${result.judgement} Priority
+Novelty Score: ${result.novelty_score}% (Derived from Cat. Level ${result.max_level_found})
+
+Reasoning:
+${result.reasoning}
+
+Search Core:
+${JSON.stringify(result.search_core, null, 2)}
+    `.trim();
+
+    const mailtoLink = `mailto:${email}?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
+
     document.getElementById('resultContent').innerHTML = `
         <div style="margin-bottom: 1.5rem;">
             <h3>Reasoning</h3>
             <p>${result.reasoning}</p>
+            <p style="font-size: 0.9rem; color: var(--text-muted); margin-top: 5px;">
+               <em>(Score calculated based on Max Match Level: ${result.max_level_found})</em>
+            </p>
         </div>
         ${litCheckHtml}
+        
+        <div style="margin-top: 2rem; text-align: center; border-top: 1px solid var(--border); padding-top: 1.5rem;">
+            <p style="margin-bottom: 1rem;"><strong>Email Report</strong></p>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+               GitHub Pages (静的サイト) からは自動送信できません。<br>
+               以下のボタンを押してメールソフトを起動してください。
+            </p>
+            <a href="${mailtoLink}" class="btn btn-primary" style="text-decoration: none;">
+               📩 Open Email Draft
+            </a>
+        </div>
     `;
 
     results.style.display = 'block';
     results.scrollIntoView({ behavior: 'smooth' });
 }
+```
