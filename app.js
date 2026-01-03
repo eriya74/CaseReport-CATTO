@@ -281,7 +281,7 @@ OUTPUT JSON FORMAT:
 
         // 1. Narrow Search (target 100)
         let pmids = await searchPubMed(preJson.pubmed_query.narrow, 100);
-        let usedQuery = preJson.pubmed_query.narrow; // Track which query was successful
+        let usedQuery = preJson.pubmed_query.narrow;
 
         // 2. Broad Search if low results (< 20)
         if (pmids.length < 20) {
@@ -332,7 +332,7 @@ OUTPUT JSON FORMAT:
             };
         } else {
             // Step 4-6: Evaluation with Structural Hallucination Prevention
-            // 1. Prepare Papers for LLM (Hide PMIDs/Titles, show only Content and assigned ID)
+            // 1. Prepare Papers for LLM
             const papersForLLM = papers.map((p, i) =>
                 `[P${i + 1}] Abstract: ${p.abstract}`
             ).join('\n\n');
@@ -365,27 +365,33 @@ STEP 6: Quick Literature Check
 Select relevant papers that support your evaluation (e.g. highest matches or close calls).
 Return "paper_evaluations" for each selected paper.
 
+IMPORTANT: You MUST provide "evidence_quotes" for EACH paper evaluation.
+- evidence_quotes: An array of 1-2 short phrases DIRECTLY COPIED from the Abstract of the paper.
+- Phrases must be 20-120 chars.
+- NO paraphrasing. Quotes must potentially match via string "includes()" check.
+- If no direct evidence exists, return an empty array [].
+- DO NOT assign a high match level (3-4) without finding clear quote evidence. Be conservative.
+
 OUTPUT JSON FORMAT:
 {
   "max_level_found": 0-4,
   "judgement": "High" | "Moderate" | "Low",
-  "selected_paper_ids": [1, 2, 5], // List of IDs of relevant papers (integers). NO LIMIT, pick all relevant.
+  "selected_paper_ids": [1, 2, 5],
   "paper_evaluations": [
     {
-      "paper_id": 1, // Integer ID corresponding to [P1]
+      "paper_id": 1,
       "match_level": 1-4,
       "matched_elements": "...",
       "unmatched_elements": "...",
-      "difference": "..."
+      "difference": "...",
+      "evidence_quotes": ["...", "..."]
     }
   ],
-  "reasoning_with_ids": "Explain why this level was chosen. WHEN CITING PAPERS, YOU MUST USE THE FORMAT [P1], [P2], etc. DO NOT WRITE TITLES OR PMIDS."
+  "reasoning_with_ids": "Explain why this level was chosen. WHEN CITING PAPERS, YOU MUST USE THE FORMAT [P1], [P2], etc."
 }
 `;
-
             console.log('Step 4-6: Evaluating novelty (ID-based Structured Analysis)...');
 
-            // Use JSON Schema via responseMimeType
             const evalResult = await model.generateContent({
                 contents: [{ role: "user", parts: [{ text: evalPrompt }] }],
                 generationConfig: {
@@ -396,130 +402,167 @@ OUTPUT JSON FORMAT:
             const evalText = evalResult.response.text();
             const evalJson = extractJson(evalText);
 
-            // --- JavaScript Reconstruction (The Source of Truth) ---
+            // --- JavaScript Reconstruction & VERIFICATION (The Source of Truth) ---
             console.log('Reconstructing results from trusted data...');
 
-            // Show paper count debug info in console and store for logic
-            const totalPapersFound = papers.length;
-            console.log(`Verification: Validating against ${totalPapersFound} actual papers.`);
-
-            // 1. Reconstruct Quick Literature Check (High-Reliability Logic)
             const validatedLitCheck = [];
-            let rawSelectedIds = evalJson.selected_paper_ids;
-            let validEvidenceFound = false; // Flag to check if ANY valid paper supports the AI's claim
+            let verifiedMaxLevel = 0; // Will be recalculated
+            let systemNotes = [];
 
-            // Fallback: If selected_paper_ids is empty/missing, use paper_evaluations IDs
-            if ((!rawSelectedIds || rawSelectedIds.length === 0) && evalJson.paper_evaluations) {
-                rawSelectedIds = evalJson.paper_evaluations.map(e => e.paper_id);
-            }
+            // 1. Process and Verify each paper
+            // Logic: Scan all unique IDs mentioned in selected_paper_ids AND paper_evaluations
+            let rawSelectedIds = evalJson.selected_paper_ids || [];
+            if (!Array.isArray(rawSelectedIds)) rawSelectedIds = [rawSelectedIds];
 
-            // Normalize IDs to integers [1, 2, 3...]
-            let normalizedIds = [];
-            if (rawSelectedIds) {
-                // Ensure array
-                if (!Array.isArray(rawSelectedIds)) rawSelectedIds = [rawSelectedIds];
+            let evals = evalJson.paper_evaluations || [];
+            // Merge IDs from evaluations into selection if missing
+            evals.forEach(ev => {
+                if (ev.paper_id && !rawSelectedIds.includes(ev.paper_id)) {
+                    // Optional: deciding whether to include automatic evals not in selection
+                    // For now, trust explicit selection or just process what we have.
+                    // Let's stick to processing IDs that appear in evaluations relevant to the selection.
+                }
+            });
 
-                // Extract numbers from anything like "1", "[P1]", 1, "Paper 1"
-                normalizedIds = rawSelectedIds.map(id => {
-                    const s = String(id);
-                    const match = s.match(/(\d+)/);
-                    return match ? parseInt(match[1], 10) : null;
-                }).filter(n => n !== null);
-            }
+            // Normalize IDs to handle various AI outputs
+            const extractId = (val) => {
+                const s = String(val);
+                const match = s.match(/(\d+)/);
+                return match ? parseInt(match[1], 10) : null;
+            };
 
-            const uniqueIds = [...new Set(normalizedIds)];
+            const processedIds = new Set();
 
-            for (const pid of uniqueIds) {
-                // Validate ID range (pid is 1-based, papers index is 0-based)
-                const index = pid - 1;
-                if (index >= 0 && index < papers.length) {
-                    const originalPaper = papers[index];
-                    validEvidenceFound = true; // Found at least one real paper cited
+            // Filter evaluations to only those that match valid IDs 1..papers.length
+            const validEvaluations = evals.map(ev => {
+                ev._cleanId = extractId(ev.paper_id);
+                return ev;
+            }).filter(ev => ev._cleanId !== null && ev._cleanId >= 1 && ev._cleanId <= papers.length);
 
-                    const evaluation = evalJson.paper_evaluations?.find(e => {
-                        // Robust comparison string vs number
-                        const eIdRaw = String(e.paper_id);
-                        const eIdMatch = eIdRaw.match(/(\d+)/);
-                        const eId = eIdMatch ? parseInt(eIdMatch[1], 10) : -999;
-                        return eId === pid;
-                    });
+            // Verify Quotes Logic
+            for (const ev of validEvaluations) {
+                const pid = ev._cleanId;
+                const pIndex = pid - 1;
+                const paper = papers[pIndex];
+                const abstractLower = (paper.abstract || '').toLowerCase();
+                const quotes = ev.evidence_quotes || [];
 
+                let validQuotes = [];
+                let matchCount = 0;
+
+                quotes.forEach(q => {
+                    const qClean = q.trim().toLowerCase();
+                    // Remove quotes if included in string
+                    const qRaw = qClean.replace(/^["']|["']$/g, '');
+                    if (qRaw.length > 5 && abstractLower.includes(qRaw)) {
+                        matchCount++;
+                        validQuotes.push(q);
+                    }
+                });
+
+                let finalLevel = ev.match_level;
+                let note = '';
+
+                // Verification Rules
+                if (quotes.length === 0) {
+                    // 1) No quotes -> Downgrade to 1
+                    finalLevel = 1;
+                    note = 'No evidence provided';
+                } else if (matchCount === 0) {
+                    // 2) All quotes invalid -> Hallucination -> Level 0
+                    finalLevel = 0;
+                    note = 'Hallucinated evidence invalidated';
+                } else if (matchCount < quotes.length) {
+                    // 3) Partial -> Downgrade by 1 (min 1)
+                    finalLevel = Math.max(1, finalLevel - 1);
+                    note = 'Partial evidence match';
+                } else {
+                    // 4) Full match -> Maintain
+                }
+
+                // Track Max Level
+                if (finalLevel > verifiedMaxLevel) {
+                    verifiedMaxLevel = finalLevel;
+                }
+
+                // Only add to literature check if level > 0 (valid)
+                if (finalLevel > 0) {
                     validatedLitCheck.push({
-                        pmid: originalPaper.pmid, // Source of Truth
-                        doi: originalPaper.doi || '', // Source of Truth
-                        title: originalPaper.title, // Source of Truth
-                        url: originalPaper.url, // Source of Truth
-                        matched_elements: evaluation?.matched_elements || 'N/A',
-                        unmatched_elements: evaluation?.unmatched_elements || 'N/A',
-                        difference: evaluation?.difference || 'N/A'
+                        pmid: paper.pmid,
+                        doi: paper.doi || '',
+                        title: paper.title,
+                        url: paper.url,
+                        matched_elements: ev.matched_elements || 'N/A',
+                        unmatched_elements: ev.unmatched_elements || 'N/A',
+                        difference: ev.difference || 'N/A',
+                        evidence_quotes: validQuotes, // Only valid ones
+                        verification_note: note,
+                        verified_level: finalLevel
                     });
+                } else {
+                    systemNotes.push(`Paper [P${pid}] invalidated: ${note}.`);
                 }
             }
 
-            // 2. Reconstruct Reasoning (Robust Search & Replace & Hallucination Check)
+            // Sort by level descending
+            validatedLitCheck.sort((a, b) => b.verified_level - a.verified_level);
+
+            // 2. Reconstruct Reasoning
             let finalReasoning = evalJson.reasoning_with_ids || evalJson.reasoning || '';
             if (finalReasoning) {
-                // Callback for replacement to also detect invalid IDs used in text
-                // SAFE REPLACEMENT: Avoid brackets in error message to prevent recursion in subsequent regex calls
                 const replaceCallback = (match, idStr) => {
                     const index = parseInt(idStr, 10) - 1;
                     if (index >= 0 && index < papers.length) {
                         const p = papers[index];
-                        validEvidenceFound = true; // Reasoning cites a real paper
                         return `${p.title} (PMID: ${p.pmid})`;
                     }
-                    return `(Citation Error: Paper ID #${idStr} not found)`; // SAFE STRING
+                    return `(Citation Error: Paper ID #${idStr} not found)`;
                 };
-
-                // 1. [P1], [1], (P1)
                 finalReasoning = finalReasoning.replace(/(\[|\()\s*(?:Paper|P)?\s*(\d+)\s*(\]|\))/gi, (match, open, idStr, close) => replaceCallback(match, idStr));
-
-                // 2. Standalone "P1" or "Paper 1"
                 finalReasoning = finalReasoning.replace(/\b(?:Paper|P)\s*(\d+)\b/gi, (match, idStr) => replaceCallback(match, idStr));
             }
 
-            // --- CORE VALIDATION: PREVENT FALSE NEGATIVES ---
-            // If the AI claims a high match level (Level 2-4) but fails to cite ANY valid existing paper,
-            // it is a Hallucination. We must downgrade the level to 0 (Novel).
-            let finalMaxLevel = evalJson.max_level_found;
-            let finalJudgement = evalJson.judgement;
-            let hallucinationWarning = '';
-
-            if (finalMaxLevel >= 2 && !validEvidenceFound) {
-                console.warn('Logic Mismatch: High level claimed but no valid papers cited. Downgrading to Level 0.');
-                finalMaxLevel = 0;
-                finalJudgement = 'High'; // Force High Priority (Novel)
-                hallucinationWarning = '\n\n[System Note: The AI initially claimed a match level of ' + evalJson.max_level_found + ' but failed to provide a valid existing citation. This has been flagged as a hallucination and re-evaluated as potentially novel.]';
-                finalReasoning += hallucinationWarning;
+            // Append System Notes
+            if (systemNotes.length > 0) {
+                finalReasoning += `\n\n[System Verification Note: ${systemNotes.join(' ')}]`;
             }
 
-            // Evaluated Result Construction
-            const finalEvalJson = {
-                max_level_found: finalMaxLevel,
-                judgement: finalJudgement,
-                reasoning: finalReasoning,
-                quick_lit_check: validatedLitCheck
-            };
+            // Recalculate Judgement based on VERIFIED Max Level
+            let finalJudgement = 'Low';
+            if (verifiedMaxLevel <= 1) finalJudgement = 'High';
+            else if (verifiedMaxLevel === 2) finalJudgement = 'Moderate';
+            else if (verifiedMaxLevel >= 3) finalJudgement = 'Low';
+            // Note: User prompt said 0-1 High, 2 Moderate, 3-4 Low. 
+            // My previous logic was: 
+            // Level 4 (Many reports) -> <= 20%
+            // Level 3 (Some reports) -> 30-50%
+            // Level 2 (Few reports) -> 60-80%
+            // Level 1/0 (Novel) -> >= 85%
+            // I will match the score logic to judgment logic.
 
-            // Deterministic Score Calculation
             let calcScore = 0;
-            const maxLevel = finalEvalJson.max_level_found;
-
-            if (maxLevel >= 4) {
+            if (verifiedMaxLevel >= 4) {
                 calcScore = 15;
-            } else if (maxLevel === 3) {
+                finalJudgement = 'Low';
+            } else if (verifiedMaxLevel === 3) {
                 calcScore = 40;
-            } else if (maxLevel === 2) {
+                finalJudgement = 'Low'; // or Moderate-Low
+            } else if (verifiedMaxLevel === 2) {
                 calcScore = 70;
-            } else { // maxLevel is 0 or 1
+                finalJudgement = 'Moderate';
+            } else {
                 calcScore = 90;
+                finalJudgement = 'High';
             }
 
-            // Force consistency
             finalResult = {
                 ...preJson,
-                ...finalEvalJson,
-                novelty_score: calcScore
+                max_level_found: verifiedMaxLevel,
+                judgement: finalJudgement,
+                reasoning: finalReasoning,
+                quick_lit_check: validatedLitCheck,
+                novelty_score: calcScore,
+                pubmed_query: preJson.pubmed_query // Ensure query is passed
             };
         }
 
@@ -571,7 +614,6 @@ function displayResults(result, formData, totalPapers = -1) {
     litCheckHtml += '<ul style="list-style: none; padding: 0;">';
     let litCheckEmailText = '';
 
-    // Add search stats info
     if (totalPapers === 0) {
         litCheckHtml += `<div style="background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3); padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 0.9rem; color: #fbbf24;">
             ⚠️ PubMed query returned 0 results. No literature available for verification.
@@ -581,14 +623,26 @@ function displayResults(result, formData, totalPapers = -1) {
     if (result.quick_lit_check && result.quick_lit_check.length > 0) {
         result.quick_lit_check.forEach((cite, idx) => {
             const doiDisplay = cite.doi ? ` | DOI: ${cite.doi}` : '';
+            // Format quotes
+            let quotesHtml = '';
+            let quotesText = '';
+            if (cite.evidence_quotes && cite.evidence_quotes.length > 0) {
+                quotesHtml = `<div style="margin-top: 0.5rem; font-style: italic; color: #a1a1aa; border-left: 2px solid #52525b; padding-left: 8px;">"${cite.evidence_quotes.join('"<br>"')}"</div>`;
+                quotesText = `\n    Evidence: "${cite.evidence_quotes.join('", "')}"`;
+            }
+            // Format verification note
+            const noteHtml = cite.verification_note ? `<span style="font-size: 0.8rem; color: #fbbf24; margin-left: 5px;">(${cite.verification_note})</span>` : '';
+
             litCheckHtml += `
                 <li style="margin-bottom: 0.75rem; padding: 0.75rem; background: rgba(0,0,0,0.2); border-radius: 8px;">
                     <div style="font-weight: bold;">
                         <a href="${cite.url}" target="_blank" style="color: var(--secondary); text-decoration: none;">${cite.title}</a>
+                        ${noteHtml}
                     </div>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">
                        PMID: ${cite.pmid}${doiDisplay}
                     </div>
+                    ${quotesHtml}
                     <div style="font-size: 0.9rem; margin-top: 0.5rem;">
                        <strong>Matched:</strong> ${cite.matched_elements}<br/>
                        <strong>Unmatched:</strong> ${cite.unmatched_elements}<br/>
@@ -598,7 +652,7 @@ function displayResults(result, formData, totalPapers = -1) {
             `;
             litCheckEmailText += `
 [${idx + 1}] ${cite.title}
-    PMID: ${cite.pmid}${cite.doi ? `\n    DOI: ${cite.doi}` : ''}
+    PMID: ${cite.pmid}${cite.doi ? `\n    DOI: ${cite.doi}` : ''}${quotesText}
     Matched Elements: ${cite.matched_elements}
     Unmatched Elements: ${cite.unmatched_elements}
     Difference: ${cite.difference}
@@ -606,12 +660,11 @@ function displayResults(result, formData, totalPapers = -1) {
 `;
         });
     } else {
-        litCheckHtml += '<li>No specific papers listed.</li>';
+        litCheckHtml += '<li>No specific papers listed (or all invalidated).</li>';
         litCheckEmailText = 'No specific papers found.\n';
     }
     litCheckHtml += '</ul>';
 
-    // Create comprehensive email body
     const emailSubject = `症例報告スクリーニング結果: ${result.judgement} Priority (Novelty ${result.novelty_score}%)`;
     const emailBody = `
 ========================================
@@ -640,7 +693,7 @@ ${litCheckEmailText}
 ━━━━━━━━━━━━━━━━━━━━━━
 A. Main Event (主事象):
 ${formData.main_event_1line}
-... (省略/Truncated for brevity in draft) ...
+...
     `.trim();
 
     const mailtoLink = `mailto:${formData.submitter_email}?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
