@@ -468,6 +468,16 @@ OUTPUT JSON FORMAT:
                 }
                 return match;
             });
+
+            // 3. Standalone "Paper 1" (No brackets, just words)
+            finalReasoning = finalReasoning.replace(/\bPaper\s+(\d+)\b/gi, (match, idStr) => {
+                const index = parseInt(idStr, 10) - 1;
+                if (index >= 0 && index < papers.length) {
+                    const p = papers[index];
+                    return `${p.title} (PMID: ${p.pmid})`;
+                }
+                return match;
+            });
         }
 
         // Final Result Construction
