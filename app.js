@@ -192,23 +192,24 @@ OUTPUT JSON FORMAT:
         const papers = await fetchPubMedDetails(pmids);
         console.log(`Found ${papers.length} papers`);
 
-        // Step 4-6: Evaluation
-        const papersText = papers.map((p, i) =>
-            `[${i + 1}] PMID: ${p.pmid}${p.doi ? ` | DOI: ${p.doi}` : ''}
-Title: ${p.title}
-Abstract: ${p.abstract}`
+        // Step 4-6: Evaluation with Structural Hallucination Prevention
+        // 1. Prepare Papers for LLM (Hide PMIDs/Titles, show only Content and assigned ID)
+        const papersForLLM = papers.map((p, i) =>
+            `[P${i + 1}] Abstract: ${p.abstract}`
         ).join('\n\n');
 
         const evalPrompt = `
 You are an expert Anesthesiologist.
 Perform STEPS 4, 5, 6 based on the Search Core and Retrieved Papers.
+The papers are provided with IDs [P1], [P2], etc.
+You must refer to papers ONLY by their ID (e.g., [P1]).
 Output strictly in JSON format.
 
 SEARCH CORE:
 ${JSON.stringify(preJson.search_core, null, 2)}
 
 RETRIEVED PAPERS (Top 20):
-${papersText}
+${papersForLLM}
 
 STEP 4: CATTO Level Evaluation
 Evaluate EACH paper's match level (1-4).
@@ -222,115 +223,88 @@ Determine the "max_level_found" (integer 0-4) based on the highest match found i
 (0 means no matches found).
 
 STEP 6: Quick Literature Check
-CRITICAL REQUIREMENT: You MUST include up to 20 papers in "quick_lit_check" array.
-For EVERY paper you cite in your "reasoning", that paper MUST appear in the "quick_lit_check" array.
-DO NOT reference any PMID in "reasoning" that is not listed in "quick_lit_check".
-
-IMPORTANT: Use the ACTUAL PMID numbers (e.g., 39803014) from the retrieved papers list. 
-DO NOT use indices like "PMID 1" or placeholders like "Title-PMID 3".
-ALWAYS use the format "Title (PMID: 12345678)" in the reasoning text.
+Select up to 20 relevant papers that support your evaluation.
+Return "paper_evaluations" for each selected paper.
 
 OUTPUT JSON FORMAT:
 {
   "max_level_found": 0-4,
   "judgement": "High" | "Moderate" | "Low",
-  "reasoning": "Explain why this level was chosen. When citing papers, YOU MUST USE the format 'Paper Title (PMID: 12345678)'. Do not use 'PMID 1' or 'Paper 1'. Use the actual IDs.",
-  "quick_lit_check": [
+  "selected_paper_ids": [1, 2, 5], // List of IDs of relevant papers (integers)
+  "paper_evaluations": [
     {
-      "pmid": "actual PMID number (e.g., 39803014) from the papers list above",
-      "doi": "DOI if available, otherwise empty string",
-      "title": "Exact title from the paper list",
+      "paper_id": 1, // Integer ID corresponding to [P1]
+      "match_level": 1-4,
       "matched_elements": "...",
       "unmatched_elements": "...",
       "difference": "..."
     }
-    // Include up to 20 most relevant papers here
   ],
-  "representative_citations": [
-      { "pmid": "actual PMID", "title": "...", "year": "..." }
-  ]
+  "reasoning_with_ids": "Explain why this level was chosen. WHEN CITING PAPERS, YOU MUST USE THE FORMAT [P1], [P2], etc. DO NOT WRITE TITLES OR PMIDS."
 }
-
-IMPORTANT: The "quick_lit_check" array should contain the most relevant papers (up to 20). Every PMID you mention in "reasoning" MUST be in this array. Use EXACT PMIDs from the retrieved papers.
 `;
 
-        console.log('Step 4-6: Evaluating novelty (First Pass)...');
-        const evalResult = await model.generateContent(evalPrompt);
+        console.log('Step 4-6: Evaluating novelty (ID-based Structured Analysis)...');
+
+        // Use JSON Schema if supported, otherwise rely on prompt and extractJson
+        const evalResult = await model.generateContent({
+            contents: [{ role: "user", parts: [{ text: evalPrompt }] }],
+            generationConfig: {
+                responseMimeType: "application/json"
+            }
+        });
+
         const evalText = evalResult.response.text();
         const evalJson = extractJson(evalText);
 
-        // Second verification pass to reduce hallucinations
-        console.log('Verification Pass: Re-checking literature analysis...');
-        const verifyPrompt = `
-You are an expert Anesthesiologist performing a VERIFICATION check.
-Review the following analysis and verify its accuracy against the retrieved papers.
+        // --- JavaScript Reconstruction (The Source of Truth) ---
+        console.log('Reconstructing results from trusted data...');
 
-RETRIEVED PAPERS:
-${papersText}
-
-PREVIOUS ANALYSIS TO VERIFY:
-${JSON.stringify(evalJson, null, 2)}
-
-CRITICAL VERIFICATION TASKS:
-1. Check that every PMID in "quick_lit_check" exists in the RETRIEVED PAPERS list above.
-2. Verify that the title for each PMID matches EXACTLY with the retrieved paper.
-3. Confirm that matched_elements, unmatched_elements, and difference are accurate based on the paper's abstract.
-4. Ensure "reasoning" uses ACTUAL PMIDs (e.g., "Title (PMID: 12345678)") and NOT placeholders like "PMID 1".
-5. If you find any errors (hallucinated PMIDs, wrong titles, placeholders), CORRECT them in the output.
-
-OUTPUT the corrected JSON in the same format:
-{
-  "max_level_found": 0-4,
-  "judgement": "High" | "Moderate" | "Low",
-  "reasoning": "...",
-  "quick_lit_check": [
-    {
-      "pmid": "exact PMID from papers",
-      "doi": "exact DOI from papers or empty string",
-      "title": "exact title from papers",
-      "matched_elements": "...",
-      "unmatched_elements": "...",
-      "difference": "..."
-    }
-  ],
-  "representative_citations": [...]
-}
-
-IMPORTANT: Only include papers that actually exist in the RETRIEVED PAPERS list. Do not make up or hallucinate any information.
-`;
-
-        const verifyResult = await model.generateContent(verifyPrompt);
-        const verifyText = verifyResult.response.text();
-        const verifiedJson = extractJson(verifyText);
-
-        // Cross-validate against actual PubMed data
-        console.log('Cross-validating against PubMed data...');
+        // 1. Reconstruct Quick Literature Check
         const validatedLitCheck = [];
+        if (evalJson.selected_paper_ids && Array.isArray(evalJson.selected_paper_ids)) {
+            // Remove duplicates
+            const uniqueIds = [...new Set(evalJson.selected_paper_ids)];
 
-        if (verifiedJson.quick_lit_check && verifiedJson.quick_lit_check.length > 0) {
-            for (const cite of verifiedJson.quick_lit_check) {
-                // Find matching paper in our retrieved data
-                const matchedPaper = papers.find(p => p.pmid === cite.pmid);
+            for (const pid of uniqueIds) {
+                // Validate ID range
+                const index = pid - 1; // [P1] -> index 0
+                if (index >= 0 && index < papers.length) {
+                    const originalPaper = papers[index];
+                    const evaluation = evalJson.paper_evaluations?.find(e => e.paper_id === pid);
 
-                if (matchedPaper) {
-                    // Use actual data from PubMed, keep AI's analysis
                     validatedLitCheck.push({
-                        pmid: matchedPaper.pmid,  // Guaranteed correct
-                        doi: matchedPaper.doi || '',  // Guaranteed correct
-                        title: matchedPaper.title,  // Guaranteed correct
-                        matched_elements: cite.matched_elements,
-                        unmatched_elements: cite.unmatched_elements,
-                        difference: cite.difference
+                        pmid: originalPaper.pmid, // Source of Truth
+                        doi: originalPaper.doi || '', // Source of Truth
+                        title: originalPaper.title, // Source of Truth
+                        url: `https://pubmed.ncbi.nlm.nih.gov/${originalPaper.pmid}/`,
+                        matched_elements: evaluation?.matched_elements || 'N/A',
+                        unmatched_elements: evaluation?.unmatched_elements || 'N/A',
+                        difference: evaluation?.difference || 'N/A'
                     });
-                } else {
-                    console.warn(`PMID ${cite.pmid} not found in retrieved papers - skipping (hallucination detected)`);
                 }
             }
         }
 
-        // Use verified data with validated literature check
+        // 2. Reconstruct Reasoning (Replace [P#] with "Title (PMID: ...)")
+        let finalReasoning = evalJson.reasoning_with_ids || '';
+        if (finalReasoning) {
+            // Replace [P#] with citation
+            finalReasoning = finalReasoning.replace(/\[P(\d+)\]/g, (match, idStr) => {
+                const index = parseInt(idStr) - 1;
+                if (index >= 0 && index < papers.length) {
+                    const p = papers[index];
+                    return `${p.title} (PMID: ${p.pmid})`;
+                }
+                return match; // Keep as is if invalid ID
+            });
+        }
+
+        // Final Result Construction
         const finalEvalJson = {
-            ...verifiedJson,
+            max_level_found: evalJson.max_level_found,
+            judgement: evalJson.judgement,
+            reasoning: finalReasoning,
             quick_lit_check: validatedLitCheck
         };
 
