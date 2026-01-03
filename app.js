@@ -48,11 +48,54 @@ function extractJson(text) {
 }
 
 // PubMed Search Functions
-async function searchPubMed(query, retmax = 20) {
-    const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=${retmax}&retmode=json`;
+async function searchPubMed(query, retmax = 100) {
+    const toolName = 'CaseReport-CATTO';
+    const email = document.getElementById('submitter_email')?.value || 'user@example.com';
+    const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=${retmax}&retmode=json&sort=relevance&tool=${toolName}&email=${email}`;
     const res = await fetch(url);
     const data = await res.json();
     return data.esearchresult?.idlist || [];
+}
+
+async function fetchSimilarPmidsByElink(seedPmids, retmaxPerSeed = 10) {
+    if (!seedPmids || seedPmids.length === 0) return [];
+
+    // Take top 5 seeds to avoid URL length issues
+    const seeds = seedPmids.slice(0, 5);
+    const toolName = 'CaseReport-CATTO';
+    const email = document.getElementById('submitter_email')?.value || 'user@example.com';
+
+    const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pubmed&linkname=pubmed_pubmed&cmd=neighbor_score&id=${seeds.join(',')}&retmode=json&tool=${toolName}&email=${email}`;
+
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        // Parse linksets
+        let similarPmids = [];
+        if (data.linksets) {
+            for (const linkset of data.linksets) {
+                if (linkset.linksetdbs) {
+                    for (const db of linkset.linksetdbs) {
+                        if (db.linkname === 'pubmed_pubmed' && db.links) {
+                            // Extract IDs, limiting per seed
+                            const ids = db.links.slice(0, retmaxPerSeed).map(l => l.id);
+                            similarPmids.push(...ids);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove duplicates and original seeds
+        const seedSet = new Set(seeds);
+        const uniqueSimilar = [...new Set(similarPmids)].filter(id => !seedSet.has(id));
+        return uniqueSimilar;
+
+    } catch (e) {
+        console.error('ELink fetch failed:', e);
+        return [];
+    }
 }
 
 async function fetchPubMedDetails(pmids) {
