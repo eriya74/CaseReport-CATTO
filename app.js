@@ -112,11 +112,29 @@ async function fetchPubMedDetails(pmids) {
     return Array.from(articles).map(article => {
         try {
             const pmid = article.querySelector('PMID')?.textContent || '';
-            const title = article.querySelector('ArticleTitle')?.textContent || '';
+
+            const titleNode = article.querySelector('ArticleTitle');
+            // Sometimes title is in BookDocument, but here mostly PubmedArticle
+            const title = titleNode ? titleNode.textContent : '';
+
             const abstractTexts = article.querySelectorAll('AbstractText');
             const abstract = Array.from(abstractTexts).map(t => t.textContent).join(' ') || 'No abstract available';
-            const journal = article.querySelector('Journal Title')?.textContent || '';
-            const year = article.querySelector('PubDate Year')?.textContent || 'N/A';
+
+            // Journal Title
+            const journalNode = article.querySelector('Journal > Title');
+            const journal = journalNode ? journalNode.textContent : (article.querySelector('Journal Title')?.textContent || '');
+
+            // Year: Try PubDate Year, then MedlineDate
+            let year = article.querySelector('PubDate > Year')?.textContent;
+            if (!year) {
+                const medlineDate = article.querySelector('PubDate > MedlineDate')?.textContent;
+                if (medlineDate) {
+                    const match = medlineDate.match(/\d{4}/);
+                    year = match ? match[0] : 'N/A';
+                } else {
+                    year = 'N/A';
+                }
+            }
 
             // Extract DOI
             let doi = '';
@@ -128,7 +146,10 @@ async function fetchPubMedDetails(pmids) {
                 }
             }
 
-            return { pmid, title, abstract, journal, year, doi };
+            // Build URL
+            const pubmedUrl = `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`;
+
+            return { pmid, title, abstract, journal, year, doi, url: pubmedUrl };
         } catch (e) {
             return null;
         }
