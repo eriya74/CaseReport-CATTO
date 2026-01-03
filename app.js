@@ -321,14 +321,25 @@ OUTPUT JSON FORMAT:
         let finalResult;
 
         if (papers.length === 0) {
-            console.warn('No papers found matching the query. Skipping LLM evaluation to avoid hallucination.');
+            console.warn('No papers found matching the query. Skipping LLM evaluation and using fallbacks.');
             finalResult = {
                 ...preJson,
                 max_level_found: 0,
                 judgement: 'High',
                 reasoning: 'Detailed analysis could not be performed because no relevant papers were found in PubMed matching the generated search queries. This suggests the case is likely novel (High Priority) or the search terms were too specific.',
                 quick_lit_check: [],
-                novelty_score: 90
+                novelty_score: 90,
+                knowledge_gap: 'PubMed returned no results comparing to the search core. A direct knowledge gap analysis against specific literature is not possible.',
+                knowledge_gap_notes: 'System determination due to lack of literature matches (0 results).',
+                novelty_sharpeners: [
+                    'Provide a detailed timeline of events (pre-op to discharge)',
+                    'Specific hemodynamic measurements or lab values at key moments',
+                    'Intraoperative photos or imaging findings if available',
+                    'Discussion of why standard management might have failed or been insufficient',
+                    'Specific genetic or host factors that contributed to the rarity',
+                    'Long-term follow-up data (recurrence or resolution)'
+                ],
+                pubmed_query: preJson.pubmed_query
             };
         } else {
             // Step 4-6: Evaluation with Structural Hallucination Prevention
@@ -410,30 +421,17 @@ OUTPUT JSON FORMAT:
             let systemNotes = [];
 
             // 1. Process and Verify each paper
-            // Logic: Scan all unique IDs mentioned in selected_paper_ids AND paper_evaluations
             let rawSelectedIds = evalJson.selected_paper_ids || [];
             if (!Array.isArray(rawSelectedIds)) rawSelectedIds = [rawSelectedIds];
 
             let evals = evalJson.paper_evaluations || [];
-            // Merge IDs from evaluations into selection if missing
-            evals.forEach(ev => {
-                if (ev.paper_id && !rawSelectedIds.includes(ev.paper_id)) {
-                    // Optional: deciding whether to include automatic evals not in selection
-                    // For now, trust explicit selection or just process what we have.
-                    // Let's stick to processing IDs that appear in evaluations relevant to the selection.
-                }
-            });
 
-            // Normalize IDs to handle various AI outputs
             const extractId = (val) => {
                 const s = String(val);
                 const match = s.match(/(\d+)/);
                 return match ? parseInt(match[1], 10) : null;
             };
 
-            const processedIds = new Set();
-
-            // Filter evaluations to only those that match valid IDs 1..papers.length
             const validEvaluations = evals.map(ev => {
                 ev._cleanId = extractId(ev.paper_id);
                 return ev;
@@ -452,7 +450,6 @@ OUTPUT JSON FORMAT:
 
                 quotes.forEach(q => {
                     const qClean = q.trim().toLowerCase();
-                    // Remove quotes if included in string
                     const qRaw = qClean.replace(/^["']|["']$/g, '');
                     if (qRaw.length > 5 && abstractLower.includes(qRaw)) {
                         matchCount++;
@@ -465,37 +462,31 @@ OUTPUT JSON FORMAT:
 
                 // Verification Rules
                 if (quotes.length === 0) {
-                    // 1) No quotes -> Downgrade to 1
                     finalLevel = 1;
                     note = 'No evidence provided';
                 } else if (matchCount === 0) {
-                    // 2) All quotes invalid -> Hallucination -> Level 0
                     finalLevel = 0;
                     note = 'Hallucinated evidence invalidated';
                 } else if (matchCount < quotes.length) {
-                    // 3) Partial -> Downgrade by 1 (min 1)
                     finalLevel = Math.max(1, finalLevel - 1);
                     note = 'Partial evidence match';
-                } else {
-                    // 4) Full match -> Maintain
                 }
 
-                // Track Max Level
                 if (finalLevel > verifiedMaxLevel) {
                     verifiedMaxLevel = finalLevel;
                 }
 
-                // Only add to literature check if level > 0 (valid)
                 if (finalLevel > 0) {
                     validatedLitCheck.push({
                         pmid: paper.pmid,
                         doi: paper.doi || '',
                         title: paper.title,
                         url: paper.url,
+                        abstract: paper.abstract, // KEEP FOR STEP 7 Context
                         matched_elements: ev.matched_elements || 'N/A',
                         unmatched_elements: ev.unmatched_elements || 'N/A',
                         difference: ev.difference || 'N/A',
-                        evidence_quotes: validQuotes, // Only valid ones
+                        evidence_quotes: validQuotes,
                         verification_note: note,
                         verified_level: finalLevel
                     });
@@ -504,7 +495,6 @@ OUTPUT JSON FORMAT:
                 }
             }
 
-            // Sort by level descending
             validatedLitCheck.sort((a, b) => b.verified_level - a.verified_level);
 
             // 2. Reconstruct Reasoning
@@ -522,31 +512,19 @@ OUTPUT JSON FORMAT:
                 finalReasoning = finalReasoning.replace(/\b(?:Paper|P)\s*(\d+)\b/gi, (match, idStr) => replaceCallback(match, idStr));
             }
 
-            // Append System Notes
             if (systemNotes.length > 0) {
                 finalReasoning += `\n\n[System Verification Note: ${systemNotes.join(' ')}]`;
             }
 
-            // Recalculate Judgement based on VERIFIED Max Level
+            // Recalculate Judgement
             let finalJudgement = 'Low';
-            if (verifiedMaxLevel <= 1) finalJudgement = 'High';
-            else if (verifiedMaxLevel === 2) finalJudgement = 'Moderate';
-            else if (verifiedMaxLevel >= 3) finalJudgement = 'Low';
-            // Note: User prompt said 0-1 High, 2 Moderate, 3-4 Low. 
-            // My previous logic was: 
-            // Level 4 (Many reports) -> <= 20%
-            // Level 3 (Some reports) -> 30-50%
-            // Level 2 (Few reports) -> 60-80%
-            // Level 1/0 (Novel) -> >= 85%
-            // I will match the score logic to judgment logic.
-
             let calcScore = 0;
             if (verifiedMaxLevel >= 4) {
                 calcScore = 15;
                 finalJudgement = 'Low';
             } else if (verifiedMaxLevel === 3) {
                 calcScore = 40;
-                finalJudgement = 'Low'; // or Moderate-Low
+                finalJudgement = 'Low';
             } else if (verifiedMaxLevel === 2) {
                 calcScore = 70;
                 finalJudgement = 'Moderate';
@@ -555,6 +533,85 @@ OUTPUT JSON FORMAT:
                 finalJudgement = 'High';
             }
 
+            // --- STEP 7: KNOWLEDGE GAP & NOVELTY SHARPENERS ---
+            console.log('Step 7: Identifying Knowledge Gaps & Novelty Sharpeners...');
+            let step7Result = {
+                knowledge_gap: '',
+                novelty_sharpeners: [],
+                knowledge_gap_notes: ''
+            };
+
+            // Only proceed if we have at least ONE verified valid paper
+            if (validatedLitCheck.length > 0) {
+                // Prepare context: Verified Papers (Title, PMID, Quotes) - NO Abstract Full Text to prevent re-hallucination of unverified parts
+                const verifiedContext = validatedLitCheck.map(p => ({
+                    title: p.title,
+                    pmid: p.pmid,
+                    verified_level: p.verified_level,
+                    verified_evidence_quotes: p.evidence_quotes || []
+                }));
+
+                const step7Prompt = `
+You are an expert Medical Editor.
+Perform STEP 7 based on the VERIFIED analysis results.
+Output strictly in JSON format.
+
+INPUTS:
+- Verified Match Level: ${verifiedMaxLevel}
+- Validated Literature (Only trusted evidence quotes are provided):
+${JSON.stringify(verifiedContext, null, 2)}
+- Case Input Subject:
+${JSON.stringify(preJson.reconstructed_catto, null, 2)}
+
+STEP 7 TASKS:
+1. Knowledge Gap: Explain what is missing in the literature compared to this case.
+   - Base this ONLY on the provided "verified_evidence_quotes" and "verified_level".
+   - If verified_level is low (1-2), emphasize the lack of specific matching reports.
+   - Do NOT invent facts about the papers that are not in the quotes.
+   - If evidence is thin, state that "Specific comparison is limited due to lack of detailed matching evidence in abstract."
+2. Novelty Sharpeners: Suggest 5-8 specific data points or details the author should ADD to their Case Report to strengthen its novelty and scientific value.
+   - Focus on distinct medical details (e.g., specific lab trends, genetic markers, exact timeline, imaging specifics).
+   - Do NOT suggest general things like "write a good introduction". Be specific to the clinical context.
+
+OUTPUT JSON FORMAT:
+{
+  "knowledge_gap": "...",
+  "novelty_sharpeners": ["...", "..."],
+  "knowledge_gap_notes": "..." 
+}
+`;
+                try {
+                    const step7Res = await model.generateContent({
+                        contents: [{ role: "user", parts: [{ text: step7Prompt }] }],
+                        generationConfig: { responseMimeType: "application/json" }
+                    });
+                    const step7Json = extractJson(step7Res.response.text());
+                    step7Result = step7Json;
+                } catch (e) {
+                    console.error('Step 7 failed:', e);
+                    step7Result = {
+                        knowledge_gap: 'Analysis failed during Step 7.',
+                        novelty_sharpeners: ['Focus on unique clinical timeline', 'Detail the specific intervention outcomes'],
+                        knowledge_gap_notes: 'Error in generation.'
+                    };
+                }
+            } else {
+                // Fallback for 0 valid papers (all invalidated or empty selection)
+                step7Result = {
+                    knowledge_gap: 'No validated literature was found to be sufficiently similar. This confirms a significant knowledge gap regarding this specific presentation.',
+                    knowledge_gap_notes: 'Determined by lack of verified matching papers.',
+                    novelty_sharpeners: [
+                        'Detailed Timeline of events (onset to resolution)',
+                        'Specific Hemodynamic parameters at crisis moments',
+                        'Intraoperative photos or Video evidence if available',
+                        'Long-term follow-up outcomes (recurrence/complications)',
+                        'Discussion on why standard guidelines were insufficient',
+                        'Specific genetic or host risk factors involved'
+                    ]
+                };
+            }
+
+
             finalResult = {
                 ...preJson,
                 max_level_found: verifiedMaxLevel,
@@ -562,7 +619,10 @@ OUTPUT JSON FORMAT:
                 reasoning: finalReasoning,
                 quick_lit_check: validatedLitCheck,
                 novelty_score: calcScore,
-                pubmed_query: preJson.pubmed_query // Ensure query is passed
+                pubmed_query: preJson.pubmed_query,
+                knowledge_gap: step7Result.knowledge_gap,
+                knowledge_gap_notes: step7Result.knowledge_gap_notes,
+                novelty_sharpeners: step7Result.novelty_sharpeners
             };
         }
 
@@ -665,6 +725,21 @@ function displayResults(result, formData, totalPapers = -1) {
     }
     litCheckHtml += '</ul>';
 
+    // Sharpeners HTML
+    let sharpenersHtml = '';
+    let sharpenersText = '';
+    if (result.novelty_sharpeners && result.novelty_sharpeners.length > 0) {
+        sharpenersHtml = `<ul style="margin-top: 5px; padding-left: 1.2rem; color: #e2e8f0;">`;
+        result.novelty_sharpeners.forEach(item => {
+            sharpenersHtml += `<li style="margin-bottom: 4px;">${item}</li>`;
+            sharpenersText += `- ${item}\n`;
+        });
+        sharpenersHtml += `</ul>`;
+    }
+
+    // Knowledge Gap HTML
+    let gapNoteHtml = result.knowledge_gap_notes ? `<div style="font-size: 0.8rem; color: #9ca3af; margin-top: 4px; font-style: italic;">(${result.knowledge_gap_notes})</div>` : '';
+
     const emailSubject = `症例報告スクリーニング結果: ${result.judgement} Priority (Novelty ${result.novelty_score}%)`;
     const emailBody = `
 ========================================
@@ -674,6 +749,15 @@ function displayResults(result, formData, totalPapers = -1) {
 【判定 / Judgement】
 Priority: ${result.judgement}
 Novelty Score: ${result.novelty_score}% (CATTO Level ${result.max_level_found} に基づく)
+
+【Knowledge Gap】
+━━━━━━━━━━━━━━━━━━━━━━
+${result.knowledge_gap}
+${result.knowledge_gap_notes ? `(${result.knowledge_gap_notes})` : ''}
+
+【To strengthen novelty (additional info to add)】
+━━━━━━━━━━━━━━━━━━━━━━
+${sharpenersText}
 
 【理由 / Reasoning】
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -693,7 +777,7 @@ ${litCheckEmailText}
 ━━━━━━━━━━━━━━━━━━━━━━
 A. Main Event (主事象):
 ${formData.main_event_1line}
-...
+... (省略/Truncated)
     `.trim();
 
     const mailtoLink = `mailto:${formData.submitter_email}?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
@@ -706,6 +790,18 @@ ${formData.main_event_1line}
                <em>(Score calculated based on Max Match Level: ${result.max_level_found})</em>
             </p>
         </div>
+        
+        <div style="margin-bottom: 1.5rem; background: rgba(255, 255, 255, 0.03); padding: 1rem; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1);">
+            <h4 style="margin-top: 0; color: var(--secondary);">Knowledge Gap</h4>
+            <p style="margin-bottom: 0.5rem;">${result.knowledge_gap}</p>
+            ${gapNoteHtml}
+        </div>
+
+        <div style="margin-bottom: 1.5rem; background: rgba(255, 255, 255, 0.03); padding: 1rem; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1);">
+            <h4 style="margin-top: 0; color: #fbbf24;">What additional information would strengthen novelty?</h4>
+            ${sharpenersHtml}
+        </div>
+
         ${litCheckHtml}
         
         <div style="margin-top: 2rem; text-align: center; border-top: 1px solid var(--border); padding-top: 1.5rem;">
