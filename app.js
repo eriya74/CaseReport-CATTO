@@ -381,18 +381,45 @@ OUTPUT JSON FORMAT:
         // --- JavaScript Reconstruction (The Source of Truth) ---
         console.log('Reconstructing results from trusted data...');
 
-        // 1. Reconstruct Quick Literature Check
+        // 1. Reconstruct Quick Literature Check (Robust ID Handling)
         const validatedLitCheck = [];
-        if (evalJson.selected_paper_ids && Array.isArray(evalJson.selected_paper_ids)) {
+        let rawSelectedIds = evalJson.selected_paper_ids;
+
+        // Handle case where AI returns a single ID instead of array
+        if (rawSelectedIds && !Array.isArray(rawSelectedIds)) {
+            rawSelectedIds = [rawSelectedIds];
+        }
+
+        if (rawSelectedIds && Array.isArray(rawSelectedIds)) {
+            // Normalize IDs to integers (handle 1, "1", "[P1]", "P1")
+            const normalizedIds = rawSelectedIds.map(id => {
+                if (typeof id === 'number') return id;
+                if (typeof id === 'string') {
+                    const match = id.match(/(\d+)/);
+                    if (match) return parseInt(match[1]);
+                }
+                return null;
+            }).filter(id => id !== null);
+
             // Remove duplicates
-            const uniqueIds = [...new Set(evalJson.selected_paper_ids)];
+            const uniqueIds = [...new Set(normalizedIds)];
 
             for (const pid of uniqueIds) {
                 // Validate ID range
                 const index = pid - 1; // [P1] -> index 0
                 if (index >= 0 && index < papers.length) {
                     const originalPaper = papers[index];
-                    const evaluation = evalJson.paper_evaluations?.find(e => e.paper_id === pid);
+                    const evaluation = evalJson.paper_evaluations?.find(e => {
+                        // Match evaluation by ID (robustly)
+                        const eId = e.paper_id;
+                        let eIdNum = null;
+                        if (typeof eId === 'number') eIdNum = eId;
+                        else if (typeof eId === 'string') {
+                            const m = eId.match(/(\d+)/);
+                            if (m) eIdNum = parseInt(m[1]);
+                        }
+                        return eIdNum === pid;
+                    });
 
                     validatedLitCheck.push({
                         pmid: originalPaper.pmid, // Source of Truth
@@ -407,17 +434,21 @@ OUTPUT JSON FORMAT:
             }
         }
 
-        // 2. Reconstruct Reasoning (Replace [P#] with "Title (PMID: ...)")
+        // 2. Reconstruct Reasoning (Robust Search & Replace)
         let finalReasoning = evalJson.reasoning_with_ids || evalJson.reasoning || '';
         if (finalReasoning) {
-            // Replace [P#] with citation, strict and robust regex
-            finalReasoning = finalReasoning.replace(/\[\s*P\s*(\d+)\s*\]/gi, (match, idStr) => {
+            // Replace various formats: [P1], [P 1], (P1), P1, etc.
+            // Using extremely permissive regex to catch any P-digit pattern enclosed in anything (or not)
+            // But we must be careful not to match random words.
+            // Target format is [P1]. Prompt enforces it.
+            // Regex: /\[\s*P?(\d+)\s*\]/gi  matches [1], [P1], [P 1]
+            finalReasoning = finalReasoning.replace(/\[\s*P?(\d+)\s*\]/gi, (match, idStr) => {
                 const index = parseInt(idStr) - 1;
                 if (index >= 0 && index < papers.length) {
                     const p = papers[index];
                     return `${p.title} (PMID: ${p.pmid})`;
                 }
-                return match;
+                return match; // Keep if invalid
             });
         }
 
