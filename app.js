@@ -10,6 +10,7 @@ window.addEventListener('DOMContentLoaded', () => {
         document.getElementById('formSection').style.display = 'block';
         document.getElementById('apiKeyStatus').textContent = '✓ APIキーが保存されています';
         document.getElementById('apiKeyStatus').style.color = 'var(--secondary)';
+        loadFormData();
     }
 });
 
@@ -27,7 +28,33 @@ window.saveApiKey = function () {
     document.getElementById('formSection').style.display = 'block';
     document.getElementById('apiKeyStatus').textContent = '✓ APIキーが保存されました';
     document.getElementById('apiKeyStatus').style.color = 'var(--secondary)';
+    loadFormData();
 };
+
+// Form Persistence Logic
+function loadFormData() {
+    const inputs = document.querySelectorAll('#cattoForm input, #cattoForm textarea');
+    inputs.forEach(input => {
+        if (input.id) {
+            const savedValue = localStorage.getItem('catto_form_' + input.id);
+            if (savedValue !== null) {
+                input.value = savedValue;
+            }
+        }
+    });
+}
+
+function saveFormData() {
+    const inputs = document.querySelectorAll('#cattoForm input, #cattoForm textarea');
+    inputs.forEach(input => {
+        if (input.id) {
+            localStorage.setItem('catto_form_' + input.id, input.value);
+        }
+    });
+}
+
+// Auto-save on input
+document.getElementById('cattoForm').addEventListener('input', saveFormData);
 
 // Helper to extract JSON from markdown text
 function extractJson(text) {
