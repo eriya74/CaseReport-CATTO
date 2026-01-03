@@ -246,15 +246,45 @@ OUTPUT JSON FORMAT:
         const preText = preResult.response.text();
         const preJson = extractJson(preText);
 
-        // Execute PubMed Search
-        console.log('Searching PubMed...');
-        let pmids = await searchPubMed(preJson.pubmed_query.narrow, 20);
-        if (pmids.length === 0) {
-            console.log('Narrow search yielded 0 results, trying broad...');
-            pmids = await searchPubMed(preJson.pubmed_query.broad, 20);
+        // Execute PubMed Search (Enhanced Flow)
+        console.log('Searching PubMed (Enhanced)...');
+
+        // 1. Narrow Search (target 100)
+        let pmids = await searchPubMed(preJson.pubmed_query.narrow, 100);
+
+        // 2. Broad Search if low results (< 20)
+        if (pmids.length < 20) {
+            console.log('Narrow search yielded few results, trying broad...');
+            const broadPmids = await searchPubMed(preJson.pubmed_query.broad, 200);
+
+            // Union and preserve order (relevance)
+            const pmidSet = new Set(pmids);
+            for (const pid of broadPmids) {
+                if (!pmidSet.has(pid)) {
+                    pmids.push(pid);
+                    pmidSet.add(pid);
+                }
+            }
         }
-        const papers = await fetchPubMedDetails(pmids);
-        console.log(`Found ${papers.length} papers`);
+
+        // 3. ELink Expansion (Similar Articles)
+        console.log('Fetching similar articles via ELink...');
+        const similarPmids = await fetchSimilarPmidsByElink(pmids, 10);
+
+        // Union similar PMIDs
+        const pmidSet = new Set(pmids);
+        for (const pid of similarPmids) {
+            if (!pmidSet.has(pid)) {
+                pmids.push(pid);
+            }
+        }
+
+        // Cap result size for LLM analysis (e.g., top 80)
+        const topPmids = pmids.slice(0, 80);
+        console.log(`Total candidates after expansion: ${pmids.length}, using top ${topPmids.length}`);
+
+        const papers = await fetchPubMedDetails(topPmids);
+        console.log(`Successfully fetched details for ${papers.length} papers`);
 
         // Step 4-6: Evaluation with Structural Hallucination Prevention
         // 1. Prepare Papers for LLM (Hide PMIDs/Titles, show only Content and assigned ID)
@@ -272,29 +302,29 @@ Output strictly in JSON format.
 SEARCH CORE:
 ${JSON.stringify(preJson.search_core, null, 2)}
 
-RETRIEVED PAPERS (Top 20):
+RETRIEVED PAPERS (Top candidates):
 ${papersForLLM}
 
 STEP 4: CATTO Level Evaluation
 Evaluate EACH paper's match level (1-4).
-- Level 1: Condition/Event matches
-- Level 2: + Anatomy matches
-- Level 3: + Trigger/Exposure matches
-- Level 4: + Timing matches
+- Level 1: Condition/Event matches: The abstract describes the same condition or event.
+- Level 2: + Anatomy matches: The anatomy is also consistent.
+- Level 3: + Trigger/Exposure matches: The trigger or context is also consistent.
+- Level 4: + Timing matches: The timing (intro-op/post-op phase) is also consistent.
 
 STEP 5: Novelty Assessment
 Determine the "max_level_found" (integer 0-4) based on the highest match found in literature.
 (0 means no matches found).
 
 STEP 6: Quick Literature Check
-Select up to 20 relevant papers that support your evaluation.
+Select relevant papers that support your evaluation (e.g. highest matches or close calls).
 Return "paper_evaluations" for each selected paper.
 
 OUTPUT JSON FORMAT:
 {
   "max_level_found": 0-4,
   "judgement": "High" | "Moderate" | "Low",
-  "selected_paper_ids": [1, 2, 5], // List of IDs of relevant papers (integers)
+  "selected_paper_ids": [1, 2, 5], // List of IDs of relevant papers (integers). NO LIMIT, pick all relevant.
   "paper_evaluations": [
     {
       "paper_id": 1, // Integer ID corresponding to [P1]
@@ -310,7 +340,7 @@ OUTPUT JSON FORMAT:
 
         console.log('Step 4-6: Evaluating novelty (ID-based Structured Analysis)...');
 
-        // Use JSON Schema if supported, otherwise rely on prompt and extractJson
+        // Use JSON Schema via responseMimeType
         const evalResult = await model.generateContent({
             contents: [{ role: "user", parts: [{ text: evalPrompt }] }],
             generationConfig: {
@@ -341,7 +371,7 @@ OUTPUT JSON FORMAT:
                         pmid: originalPaper.pmid, // Source of Truth
                         doi: originalPaper.doi || '', // Source of Truth
                         title: originalPaper.title, // Source of Truth
-                        url: `https://pubmed.ncbi.nlm.nih.gov/${originalPaper.pmid}/`,
+                        url: originalPaper.url, // Source of Truth
                         matched_elements: evaluation?.matched_elements || 'N/A',
                         unmatched_elements: evaluation?.unmatched_elements || 'N/A',
                         difference: evaluation?.difference || 'N/A'
@@ -351,16 +381,16 @@ OUTPUT JSON FORMAT:
         }
 
         // 2. Reconstruct Reasoning (Replace [P#] with "Title (PMID: ...)")
-        let finalReasoning = evalJson.reasoning_with_ids || '';
+        let finalReasoning = evalJson.reasoning_with_ids || evalJson.reasoning || '';
         if (finalReasoning) {
-            // Replace [P#] with citation
-            finalReasoning = finalReasoning.replace(/\[P(\d+)\]/g, (match, idStr) => {
+            // Replace [P#] with citation, strict and robust regex
+            finalReasoning = finalReasoning.replace(/\[\s*P\s*(\d+)\s*\]/gi, (match, idStr) => {
                 const index = parseInt(idStr) - 1;
                 if (index >= 0 && index < papers.length) {
                     const p = papers[index];
                     return `${p.title} (PMID: ${p.pmid})`;
                 }
-                return match; // Keep as is if invalid ID
+                return match;
             });
         }
 
