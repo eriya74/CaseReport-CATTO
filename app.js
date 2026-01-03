@@ -380,75 +380,93 @@ OUTPUT JSON FORMAT:
 
         // --- JavaScript Reconstruction (The Source of Truth) ---
         console.log('Reconstructing results from trusted data...');
+        // Debug Log
+        console.log('Eval JSON:', evalJson);
 
-        // 1. Reconstruct Quick Literature Check (Robust ID Handling)
+        // 1. Reconstruct Quick Literature Check (High-Reliability Logic)
         const validatedLitCheck = [];
         let rawSelectedIds = evalJson.selected_paper_ids;
 
-        // Handle case where AI returns a single ID instead of array
-        if (rawSelectedIds && !Array.isArray(rawSelectedIds)) {
-            rawSelectedIds = [rawSelectedIds];
+        // Fallback: If selected_paper_ids is empty/missing, use paper_evaluations IDs
+        if ((!rawSelectedIds || rawSelectedIds.length === 0) && evalJson.paper_evaluations) {
+            console.log('Fallback: extracting IDs from paper_evaluations');
+            rawSelectedIds = evalJson.paper_evaluations.map(e => e.paper_id);
         }
 
-        if (rawSelectedIds && Array.isArray(rawSelectedIds)) {
-            // Normalize IDs to integers (handle 1, "1", "[P1]", "P1")
-            const normalizedIds = rawSelectedIds.map(id => {
-                if (typeof id === 'number') return id;
-                if (typeof id === 'string') {
-                    const match = id.match(/(\d+)/);
-                    if (match) return parseInt(match[1]);
-                }
-                return null;
-            }).filter(id => id !== null);
+        // Normalize IDs to integers [1, 2, 3...]
+        let normalizedIds = [];
+        if (rawSelectedIds) {
+            // Ensure array
+            if (!Array.isArray(rawSelectedIds)) rawSelectedIds = [rawSelectedIds];
 
-            // Remove duplicates
-            const uniqueIds = [...new Set(normalizedIds)];
+            // Extract numbers from anything like "1", "[P1]", 1, "Paper 1"
+            normalizedIds = rawSelectedIds.map(id => {
+                const s = String(id);
+                const match = s.match(/(\d+)/);
+                return match ? parseInt(match[1], 10) : null;
+            }).filter(n => n !== null);
+        }
 
-            for (const pid of uniqueIds) {
-                // Validate ID range
-                const index = pid - 1; // [P1] -> index 0
-                if (index >= 0 && index < papers.length) {
-                    const originalPaper = papers[index];
-                    const evaluation = evalJson.paper_evaluations?.find(e => {
-                        // Match evaluation by ID (robustly)
-                        const eId = e.paper_id;
-                        let eIdNum = null;
-                        if (typeof eId === 'number') eIdNum = eId;
-                        else if (typeof eId === 'string') {
-                            const m = eId.match(/(\d+)/);
-                            if (m) eIdNum = parseInt(m[1]);
-                        }
-                        return eIdNum === pid;
-                    });
+        // Remove duplicates
+        const uniqueIds = [...new Set(normalizedIds)];
+        console.log('Normalized IDs to check:', uniqueIds);
 
-                    validatedLitCheck.push({
-                        pmid: originalPaper.pmid, // Source of Truth
-                        doi: originalPaper.doi || '', // Source of Truth
-                        title: originalPaper.title, // Source of Truth
-                        url: originalPaper.url, // Source of Truth
-                        matched_elements: evaluation?.matched_elements || 'N/A',
-                        unmatched_elements: evaluation?.unmatched_elements || 'N/A',
-                        difference: evaluation?.difference || 'N/A'
-                    });
-                }
+        for (const pid of uniqueIds) {
+            // Validate ID range (pid is 1-based, papers index is 0-based)
+            const index = pid - 1;
+            if (index >= 0 && index < papers.length) {
+                const originalPaper = papers[index];
+
+                // Find matching evaluation
+                const evaluation = evalJson.paper_evaluations?.find(e => {
+                    // Robust comparison string vs number
+                    const eIdRaw = String(e.paper_id);
+                    const eIdMatch = eIdRaw.match(/(\d+)/);
+                    const eId = eIdMatch ? parseInt(eIdMatch[1], 10) : -999;
+                    return eId === pid;
+                });
+
+                validatedLitCheck.push({
+                    pmid: originalPaper.pmid, // Source of Truth
+                    doi: originalPaper.doi || '', // Source of Truth
+                    title: originalPaper.title, // Source of Truth
+                    url: originalPaper.url, // Source of Truth
+                    matched_elements: evaluation?.matched_elements || 'N/A',
+                    unmatched_elements: evaluation?.unmatched_elements || 'N/A',
+                    difference: evaluation?.difference || 'N/A'
+                });
             }
         }
 
         // 2. Reconstruct Reasoning (Robust Search & Replace)
         let finalReasoning = evalJson.reasoning_with_ids || evalJson.reasoning || '';
         if (finalReasoning) {
-            // Replace various formats: [P1], [P 1], (P1), P1, etc.
-            // Using extremely permissive regex to catch any P-digit pattern enclosed in anything (or not)
-            // But we must be careful not to match random words.
-            // Target format is [P1]. Prompt enforces it.
-            // Regex: /\[\s*P?(\d+)\s*\]/gi  matches [1], [P1], [P 1]
-            finalReasoning = finalReasoning.replace(/\[\s*P?(\d+)\s*\]/gi, (match, idStr) => {
-                const index = parseInt(idStr) - 1;
+            // Replace [P1], (P1), [Paper 1], [1], Paper 1, etc.
+            // Using a broad regex that looks for P? + digits inside brackets or parens, or just P+digits
+            // Regex: /\[\s*(?:Paper\s*)?P?\s*(\d+)\s*\]/gi  -> matches [P1], [1], [Paper 1]
+            // Also simple P(\d+) -> matches P1, P2 (risky if text has P1, but reasonable context)
+
+            // Strategy: Look for specific patterns first
+            // 1. [P1], [1], [Paper 1], (P1), (1)
+            finalReasoning = finalReasoning.replace(/(\[|\()\s*(?:Paper|P)?\s*(\d+)\s*(\]|\))/gi, (match, open, idStr, close) => {
+                const index = parseInt(idStr, 10) - 1;
                 if (index >= 0 && index < papers.length) {
                     const p = papers[index];
                     return `${p.title} (PMID: ${p.pmid})`;
                 }
-                return match; // Keep if invalid
+                return match;
+            });
+
+            // 2. Standalone "Paper [P1]" or "Paper 1" might be caught by above if brackets exist. 
+            // If the AI just wrote "P1 showed that...", handled here:
+            finalReasoning = finalReasoning.replace(/\bP(\d+)\b/g, (match, idStr) => {
+                // only replace if looks like an ID in valid range
+                const index = parseInt(idStr, 10) - 1;
+                if (index >= 0 && index < papers.length) {
+                    const p = papers[index];
+                    return `${p.title} (PMID: ${p.pmid})`;
+                }
+                return match;
             });
         }
 
@@ -461,10 +479,6 @@ OUTPUT JSON FORMAT:
         };
 
         // Deterministic Score Calculation
-        // Level 4 (Many reports) -> <= 20%
-        // Level 3 (Some reports) -> 30-50%
-        // Level 2 (Few reports) -> 60-80%
-        // Level 1/0 (Novel) -> >= 85%
         let calcScore = 0;
         const maxLevel = finalEvalJson.max_level_found;
 
