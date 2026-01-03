@@ -374,7 +374,9 @@ function displayResults(result, formData) {
             const doiDisplay = cite.doi ? ` | DOI: ${cite.doi}` : '';
             litCheckHtml += `
                 <li style="margin-bottom: 0.75rem; padding: 0.75rem; background: rgba(0,0,0,0.2); border-radius: 8px;">
-                    <div style="font-weight: bold;">${cite.title}</div>
+                    <div style="font-weight: bold;">
+                        <a href="${cite.url}" target="_blank" style="color: var(--secondary); text-decoration: none;">${cite.title}</a>
+                    </div>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">
                        PMID: ${cite.pmid}${doiDisplay}
                     </div>
