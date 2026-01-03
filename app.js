@@ -380,26 +380,25 @@ OUTPUT JSON FORMAT:
 
         // --- JavaScript Reconstruction (The Source of Truth) ---
         console.log('Reconstructing results from trusted data...');
-        // Debug Log
-        console.log('Eval JSON:', evalJson);
+
+        // Show paper count debug info in console and store for logic
+        const totalPapersFound = papers.length;
+        console.log(`Verification: Validating against ${totalPapersFound} actual papers.`);
 
         // 1. Reconstruct Quick Literature Check (High-Reliability Logic)
         const validatedLitCheck = [];
         let rawSelectedIds = evalJson.selected_paper_ids;
+        let validEvidenceFound = false; // Flag to check if ANY valid paper supports the AI's claim
 
         // Fallback: If selected_paper_ids is empty/missing, use paper_evaluations IDs
         if ((!rawSelectedIds || rawSelectedIds.length === 0) && evalJson.paper_evaluations) {
-            console.log('Fallback: extracting IDs from paper_evaluations');
             rawSelectedIds = evalJson.paper_evaluations.map(e => e.paper_id);
         }
 
-        // Normalize IDs to integers [1, 2, 3...]
+        // Normalize IDs
         let normalizedIds = [];
         if (rawSelectedIds) {
-            // Ensure array
             if (!Array.isArray(rawSelectedIds)) rawSelectedIds = [rawSelectedIds];
-
-            // Extract numbers from anything like "1", "[P1]", 1, "Paper 1"
             normalizedIds = rawSelectedIds.map(id => {
                 const s = String(id);
                 const match = s.match(/(\d+)/);
@@ -407,19 +406,15 @@ OUTPUT JSON FORMAT:
             }).filter(n => n !== null);
         }
 
-        // Remove duplicates
         const uniqueIds = [...new Set(normalizedIds)];
-        console.log('Normalized IDs to check:', uniqueIds);
 
         for (const pid of uniqueIds) {
-            // Validate ID range (pid is 1-based, papers index is 0-based)
             const index = pid - 1;
             if (index >= 0 && index < papers.length) {
                 const originalPaper = papers[index];
+                validEvidenceFound = true; // Found at least one real paper cited
 
-                // Find matching evaluation
                 const evaluation = evalJson.paper_evaluations?.find(e => {
-                    // Robust comparison string vs number
                     const eIdRaw = String(e.paper_id);
                     const eIdMatch = eIdRaw.match(/(\d+)/);
                     const eId = eIdMatch ? parseInt(eIdMatch[1], 10) : -999;
@@ -427,10 +422,10 @@ OUTPUT JSON FORMAT:
                 });
 
                 validatedLitCheck.push({
-                    pmid: originalPaper.pmid, // Source of Truth
-                    doi: originalPaper.doi || '', // Source of Truth
-                    title: originalPaper.title, // Source of Truth
-                    url: originalPaper.url, // Source of Truth
+                    pmid: originalPaper.pmid,
+                    doi: originalPaper.doi || '',
+                    title: originalPaper.title,
+                    url: originalPaper.url,
                     matched_elements: evaluation?.matched_elements || 'N/A',
                     unmatched_elements: evaluation?.unmatched_elements || 'N/A',
                     difference: evaluation?.difference || 'N/A'
@@ -438,68 +433,60 @@ OUTPUT JSON FORMAT:
             }
         }
 
-        // 2. Reconstruct Reasoning (Robust Search & Replace)
+        // 2. Reconstruct Reasoning (Robust Search & Replace & Hallucination Check)
         let finalReasoning = evalJson.reasoning_with_ids || evalJson.reasoning || '';
         if (finalReasoning) {
-            // Replace [P1], (P1), [Paper 1], [1], Paper 1, etc.
-            // Using a broad regex that looks for P? + digits inside brackets or parens, or just P+digits
-            // Regex: /\[\s*(?:Paper\s*)?P?\s*(\d+)\s*\]/gi  -> matches [P1], [1], [Paper 1]
-            // Also simple P(\d+) -> matches P1, P2 (risky if text has P1, but reasonable context)
-
-            // Strategy: Look for specific patterns first
-            // 1. [P1], [1], [Paper 1], (P1), (1)
-            finalReasoning = finalReasoning.replace(/(\[|\()\s*(?:Paper|P)?\s*(\d+)\s*(\]|\))/gi, (match, open, idStr, close) => {
+            // Callback for replacement to also detect invalid IDs used in text
+            const replaceCallback = (match, idStr) => {
                 const index = parseInt(idStr, 10) - 1;
                 if (index >= 0 && index < papers.length) {
                     const p = papers[index];
+                    validEvidenceFound = true; // Reasoning cites a real paper
                     return `${p.title} (PMID: ${p.pmid})`;
                 }
-                return match;
-            });
+                return `(Invalid Citation: Paper [P${idStr}] not found)`; // Explicit error for user
+            };
 
-            // 2. Standalone "Paper [P1]" or "Paper 1" might be caught by above if brackets exist. 
-            // If the AI just wrote "P1 showed that...", handled here:
-            finalReasoning = finalReasoning.replace(/\bP(\d+)\b/g, (match, idStr) => {
-                // only replace if looks like an ID in valid range
-                const index = parseInt(idStr, 10) - 1;
-                if (index >= 0 && index < papers.length) {
-                    const p = papers[index];
-                    return `${p.title} (PMID: ${p.pmid})`;
-                }
-                return match;
-            });
+            // 1. [P1], [1], (P1)
+            finalReasoning = finalReasoning.replace(/(\[|\()\s*(?:Paper|P)?\s*(\d+)\s*(\]|\))/gi, (match, open, idStr, close) => replaceCallback(match, idStr));
 
-            // 3. Standalone "Paper 1" (No brackets, just words)
-            finalReasoning = finalReasoning.replace(/\bPaper\s+(\d+)\b/gi, (match, idStr) => {
-                const index = parseInt(idStr, 10) - 1;
-                if (index >= 0 && index < papers.length) {
-                    const p = papers[index];
-                    return `${p.title} (PMID: ${p.pmid})`;
-                }
-                return match;
-            });
+            // 2. Standalone "P1" or "Paper 1"
+            finalReasoning = finalReasoning.replace(/\b(?:Paper|P)\s*(\d+)\b/gi, (match, idStr) => replaceCallback(match, idStr));
+        }
+
+        // --- CORE VALIDATION: PREVENT FALSE NEGATIVES ---
+        // If the AI claims a high match level (Level 2-4) but fails to cite ANY valid existing paper,
+        // it is a Hallucination. We must downgrade the level to 0 (Novel).
+        let finalMaxLevel = evalJson.max_level_found;
+        let finalJudgement = evalJson.judgement;
+        let hallucinationWarning = '';
+
+        if (finalMaxLevel >= 2 && !validEvidenceFound) {
+            console.warn('Logic Mismatch: High level claimed but no valid papers cited. Downgrading to Level 0.');
+            finalMaxLevel = 0;
+            finalJudgement = 'High'; // Force High Priority (Novel)
+            hallucinationWarning = '\n\n[System Note: The AI initially claimed a match but failed to provide a valid existing citation. This has been flagged as a hallucination and re-evaluated as potentially novel.]';
+            finalReasoning += hallucinationWarning;
         }
 
         // Final Result Construction
         const finalEvalJson = {
-            max_level_found: evalJson.max_level_found,
-            judgement: evalJson.judgement,
+            max_level_found: finalMaxLevel,
+            judgement: finalJudgement,
             reasoning: finalReasoning,
             quick_lit_check: validatedLitCheck
         };
 
         // Deterministic Score Calculation
         let calcScore = 0;
-        const maxLevel = finalEvalJson.max_level_found;
-
-        if (maxLevel >= 4) {
+        if (finalMaxLevel >= 4) {
             calcScore = 15;
-        } else if (maxLevel === 3) {
+        } else if (finalMaxLevel === 3) {
             calcScore = 40;
-        } else if (maxLevel === 2) {
+        } else if (finalMaxLevel === 2) {
             calcScore = 70;
-        } else { // maxLevel is 0 or 1
-            calcScore = 90;
+        } else {
+            calcScore = 90; // Novel
         }
 
         // Force consistency
