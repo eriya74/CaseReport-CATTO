@@ -450,12 +450,24 @@ OUTPUT JSON FORMAT:
             const evalPrompt = `
 You are an expert Anesthesiologist.
 Perform STEPS 4, 5, 6 based on the Search Core and Retrieved Papers.
-... (Same Eval Prompt as before) ...
-OUTPUT JSON FORMAT (Same as before with Evidence Quotes):
+STEP 6: Quick Literature Check
+Select the TOP 5 most relevant papers from the provided list, sorted by match level (High to Low).
+- You MUST select 5 papers if available, even if they are low match (Level 1 or 0) or generic.
+- The user wants to see the "closest" matches found.
+Return "paper_evaluations" for each selected paper.
+
+IMPORTANT: You MUST provide "evidence_quotes" for EACH paper evaluation.
+- evidence_quotes: An array of 1-2 short phrases DIRECTLY COPIED from the Abstract of the paper.
+- Phrases must be 20-120 chars.
+- NO paraphrasing. Quotes must potentially match via string "includes()" check.
+- If no direct evidence exists, return an empty array [].
+- DO NOT assign a high match level (3-4) without finding clear quote evidence. Be conservative.
+
+OUTPUT JSON FORMAT:
 {
   "max_level_found": 0-4,
   "judgement": "High" | "Moderate" | "Low",
-  "selected_paper_ids": [1, 2],
+  "selected_paper_ids": [1, 2, 3, 4, 5],
   "paper_evaluations": [
     {
       "paper_id": 1,
@@ -463,10 +475,10 @@ OUTPUT JSON FORMAT (Same as before with Evidence Quotes):
       "matched_elements": "...",
       "unmatched_elements": "...",
       "difference": "...",
-      "evidence_quotes": ["..."]
+      "evidence_quotes": ["...", "..."]
     }
   ],
-  "reasoning_with_ids": "..."
+  "reasoning_with_ids": "Explain the novelty by explicitly comparing the case to the literature using CATTO structure:\\n- Condition/Event: ...\\n- Anatomy: ...\\n- Trigger/Timing: ...\\n- Conclusion: ...\\nWHEN CITING PAPERS, YOU MUST USE THE FORMAT [P1], [P2], etc."
 }
 `;
             // Simplified prompt call for brevity in code write-up, assumed same as previous logic
