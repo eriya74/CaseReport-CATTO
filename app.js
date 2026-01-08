@@ -838,50 +838,78 @@ function displayResults(result, formData, totalPapers = -1) {
         ${litCheckHtml}
             `;
 
-    // --- Email Button Logic ---
+    // --- Email & Copy Logic ---
     const emailBody = `Subject: Case Report Novelty Analysis Request
 
-            [Case Summary]
+[Case Summary]
 ${result.case_summary || 'N/A'}
 
-            [Novelty Score]
-            Score: ${result.novelty_score}
-            Judgement: ${result.judgement} Priority
+[Novelty Score]
+Score: ${result.novelty_score}
+Judgement: ${result.judgement} Priority
 
-            [Reasoning]
+[Reasoning]
 ${result.reasoning}
 
-            [Knowledge Gap]
+[Knowledge Gap]
 ${result.knowledge_gap}
 
-            [Novelty Sharpeners]
+[Novelty Sharpeners]
 ${(result.novelty_sharpeners || []).map(s => '- ' + s).join('\n')}
 
-            [Quick Literature Check]
+[Quick Literature Check]
 ${litCheckEmailText}
 
-            [Original Input]
-            Condition: ${formData.condition_event}
-            Anatomy: ${formData.anatomy}
-            Trigger: ${formData.trigger_exposure}
-            Timing: ${formData.timing}
+[Original Input]
+Condition: ${formData.condition_event}
+Anatomy: ${formData.anatomy}
+Trigger: ${formData.trigger_exposure}
+Timing: ${formData.timing}
 Key Findings: ${formData.key_findings}
-            Management: ${formData.management_outcome}
+Management: ${formData.management_outcome}
 Novelty Claim: ${formData.novelty_differences}
-            `;
+`;
 
-    const mailtoLink = `mailto:? subject = ${encodeURIComponent('Case Report Analysis Result')}& body=${encodeURIComponent(emailBody)} `;
+    // Encode for mailto (attempt)
+    const mailtoLink = `mailto:?subject=${encodeURIComponent('Case Report Analysis Result')}&body=${encodeURIComponent(emailBody)}`;
 
-    const emailBtnHtml = `
-                < div style = "margin-top: 30px; text-align: center;" >
-                    <a href="${mailtoLink}" class="btn" style="background: var(--secondary); color: black; text-decoration: none; display: inline-block; padding: 10px 20px; border-radius: 6px; font-weight: bold;">
-                        Open Email Draft
-                    </a>
-    </div > `;
+    // Create Buttons
+    const actionBtnsHtml = `
+    <div style="margin-top: 30px; display: flex; flex-direction: column; align-items: center; gap: 10px;">
+        <div style="display: flex; gap: 10px;">
+            <a href="${mailtoLink}" class="btn" style="background: var(--secondary); color: black; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; text-align: center;">
+                Open Email Draft
+            </a>
+            <button id="copyBtn" class="btn" style="background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; cursor: pointer;">
+                Copy Report to Clipboard
+            </button>
+        </div>
+        <p style="font-size: 0.8rem; color: #a1a1aa;">
+            (Note: If email body is empty due to length limits, please use "Copy" button and paste manually.)
+        </p>
+        <p id="copyStatus" style="font-size: 0.9rem; color: #4ade80; height: 1.2em; opacity: 0; transition: opacity 0.3s;"></p>
+    </div>`;
 
-    document.getElementById('resultContent').insertAdjacentHTML('beforeend', emailBtnHtml);
+    document.getElementById('resultContent').insertAdjacentHTML('beforeend', actionBtnsHtml);
+
+    // Bind Copy Event safely
+    setTimeout(() => {
+        const copyBtn = document.getElementById('copyBtn');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(emailBody);
+                    const status = document.getElementById('copyStatus');
+                    status.textContent = '✓ Copied to clipboard!';
+                    status.style.opacity = '1';
+                    setTimeout(() => { status.style.opacity = '0'; }, 3000);
+                } catch (err) {
+                    alert('Copy failed: ' + err);
+                }
+            });
+        }
+    }, 100);
 
     results.style.display = 'block';
     results.scrollIntoView({ behavior: 'smooth' });
 }
-
