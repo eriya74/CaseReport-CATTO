@@ -884,4 +884,4 @@ Novelty Claim: ${formData.novelty_differences}
     results.style.display = 'block';
     results.scrollIntoView({ behavior: 'smooth' });
 }
-}
+
