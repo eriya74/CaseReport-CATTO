@@ -283,7 +283,7 @@ document.getElementById('cattoForm').addEventListener('submit', async function (
     const spinner = document.getElementById('spinner');
     const results = document.getElementById('results');
 
-    btnText.textContent = 'Generating Search Strategy...';
+    btnText.textContent = 'Generating Clnical Abstract & Search Strategy...';
     spinner.style.display = 'inline-block';
     btn.disabled = true;
     results.style.display = 'none';
@@ -305,7 +305,7 @@ document.getElementById('cattoForm').addEventListener('submit', async function (
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
-        // Step 1-3 Prompt: Request Structured Proposal
+        // Step 1-3 Prompt: Request Structured Proposal AND Case Summary
         const prePrompt = `
 You are an expert Anesthesiologist and Researcher.
 Perform the following STEPS based on the input Case Report data.
@@ -314,8 +314,9 @@ Output strictly in JSON format.
 INPUT DATA:
 ${JSON.stringify(formData, null, 2)}
 
-STEP 1: CATTO Reconstruction
-Reconstruct the case event into a standardized definition.
+STEP 1: Case Summary & CATTO Reconstruction
+1. "case_summary": Generate a concise, professional Clinical Abstract (2-3 sentences) summarizing the user's input (A-H). This should read like the start of a paper.
+2. "reconstructed_catto": Reconstruct the case event into a standardized definition.
 
 STEP 2: Search Core Definition
 Define the "Search Core" for PubMed.
@@ -329,6 +330,7 @@ For each block, suggest:
 
 OUTPUT JSON FORMAT:
 {
+  "case_summary": "A 45-year-old male presented with...",
   "reconstructed_catto": { ... },
   "search_core": { ... },
   "search_proposal": {
@@ -370,18 +372,12 @@ OUTPUT JSON FORMAT:
         const narrowQuery = validatedProposal.final_query;
         const narrowCount = await fetchPubmedCount(narrowQuery);
 
-        // 2. Broad (e.g. First 2 blocks, or logic to drop modifier)
-        // Simple fallback: Drop the last block if > 2 blocks, else drop TIAB strictness?
-        // Let's implement a simple "Broader" query by taking only first 2 blocks if > 1, else keep same.
+        // 2. Broad
         let broadQuery = narrowQuery;
         if (validatedProposal.validated_blocks.length > 2) {
             const sub = validatedProposal.validated_blocks.slice(0, validatedProposal.validated_blocks.length - 1);
             broadQuery = sub.map(b => b.query).join(' AND ');
         } else {
-            // If short, maybe broaden by removing Anatomy? Context dependent. 
-            // Simplest broad: Just Block 1 (Condition) which is usually the core.
-            // Or maybe just Condition + Anatomy without Modifiers.
-            // Let's fallback to "Condition Block Only" as a broad baseline for extreme scarcity
             if (validatedProposal.validated_blocks.length > 0) {
                 broadQuery = validatedProposal.validated_blocks[0].query;
             }
@@ -404,7 +400,6 @@ OUTPUT JSON FORMAT:
                 finalQueryToUse = narrowQuery;
             }
         } else if (narrowCount > 500) {
-            // Can be narrowed further, but for now stick to narrow
             finalQueryToUse = narrowQuery;
         }
 
@@ -426,7 +421,7 @@ OUTPUT JSON FORMAT:
         const topPmids = pmids.slice(0, 80);
         const papers = await fetchPubMedDetails(topPmids);
 
-        // --- Step 4-7 Evaluation (Logic reused) ---
+        // --- Step 4-7 Evaluation ---
         let finalResult;
 
         if (papers.length === 0) {
@@ -450,6 +445,27 @@ OUTPUT JSON FORMAT:
             const evalPrompt = `
 You are an expert Anesthesiologist.
 Perform STEPS 4, 5, 6 based on the Search Core and Retrieved Papers.
+The papers are provided with IDs [P1], [P2], etc.
+You must refer to papers ONLY by their ID (e.g., [P1]).
+Output strictly in JSON format.
+
+SEARCH CORE:
+${JSON.stringify(preJson.search_core, null, 2)}
+
+RETRIEVED PAPERS (Top candidates):
+${papersForLLM}
+
+STEP 4: CATTO Level Evaluation
+Evaluate EACH paper's match level (1-4).
+- Level 1: Condition/Event matches: The abstract describes the same condition or event.
+- Level 2: + Anatomy matches: The anatomy is also consistent.
+- Level 3: + Trigger/Exposure matches: The trigger or context is also consistent.
+- Level 4: + Timing matches: The timing (intro-op/post-op phase) is also consistent.
+
+STEP 5: Novelty Assessment
+Determine the "max_level_found" (integer 0-4) based on the highest match found in literature.
+(0 means no matches found).
+
 STEP 6: Quick Literature Check
 Select the TOP 5 most relevant papers from the provided list, sorted by match level (High to Low).
 - You MUST select 5 papers if available, even if they are low match (Level 1 or 0) or generic.
@@ -481,81 +497,208 @@ OUTPUT JSON FORMAT:
   "reasoning_with_ids": "Explain the novelty by explicitly comparing the case to the literature using CATTO structure:\\n- Condition/Event: ...\\n- Anatomy: ...\\n- Trigger/Timing: ...\\n- Conclusion: ...\\nWHEN CITING PAPERS, YOU MUST USE THE FORMAT [P1], [P2], etc."
 }
 `;
-            // Simplified prompt call for brevity in code write-up, assumed same as previous logic
+
             const evalResult = await model.generateContent({
                 contents: [{ role: "user", parts: [{ text: evalPrompt }] }],
                 generationConfig: { responseMimeType: "application/json" }
             });
             const evalJson = extractJson(evalResult.response.text());
 
-            // ... (Insert Verification Logic from previous Step 862 here) ...
-            // Simplified Verification Logic for rewrite context:
+            // --- Verification Logic ---
             const validatedLitCheck = [];
             let verifiedMaxLevel = 0;
-            // ... (Standard verification loop) ...
+            let systemNotes = [];
+
             let rawSelectedIds = evalJson.selected_paper_ids || [];
             if (!Array.isArray(rawSelectedIds)) rawSelectedIds = [rawSelectedIds];
+
             let evals = evalJson.paper_evaluations || [];
-            const extractId = (val) => { const s = String(val); const match = s.match(/(\d+)/); return match ? parseInt(match[1], 10) : null; };
-            const validEvaluations = evals.map(ev => { ev._cleanId = extractId(ev.paper_id); return ev; }).filter(ev => ev._cleanId && ev._cleanId <= papers.length);
+
+            const extractId = (val) => {
+                const s = String(val);
+                const match = s.match(/(\d+)/);
+                return match ? parseInt(match[1], 10) : null;
+            };
+
+            const validEvaluations = evals.map(ev => {
+                ev._cleanId = extractId(ev.paper_id);
+                return ev;
+            }).filter(ev => ev._cleanId !== null && ev._cleanId >= 1 && ev._cleanId <= papers.length);
 
             for (const ev of validEvaluations) {
-                const paper = papers[ev._cleanId - 1];
+                const pid = ev._cleanId;
+                const pIndex = pid - 1;
+                const paper = papers[pIndex];
                 const abstractLower = (paper.abstract || '').toLowerCase();
-                // Check quotes
                 const quotes = ev.evidence_quotes || [];
-                let matchCount = 0; let validQuotes = [];
-                quotes.forEach(q => { if (q.length > 5 && abstractLower.includes(q.trim().replace(/^["']|["']$/g, '').toLowerCase())) { matchCount++; validQuotes.push(q); } });
+
+                let validQuotes = [];
+                let matchCount = 0;
+
+                quotes.forEach(q => {
+                    const qClean = q.trim().toLowerCase();
+                    const qRaw = qClean.replace(/^["']|["']$/g, '');
+                    if (qRaw.length > 5 && abstractLower.includes(qRaw)) {
+                        matchCount++;
+                        validQuotes.push(q);
+                    }
+                });
 
                 let finalLevel = ev.match_level;
-                if (quotes.length === 0) finalLevel = 1;
-                else if (matchCount === 0) finalLevel = 0;
-                else if (matchCount < quotes.length) finalLevel = Math.max(1, finalLevel - 1);
+                let note = '';
 
-                verifiedMaxLevel = Math.max(verifiedMaxLevel, finalLevel);
-                if (finalLevel > 0) {
-                    validatedLitCheck.push({
-                        pmid: paper.pmid, title: paper.title, url: paper.url, doi: paper.doi || '',
-                        verified_level: finalLevel, evidence_quotes: validQuotes,
-                        matched_elements: ev.matched_elements, unmatched_elements: ev.unmatched_elements, difference: ev.difference
-                    });
+                if (quotes.length === 0) {
+                    finalLevel = 1;
+                    note = 'No evidence provided';
+                } else if (matchCount === 0) {
+                    finalLevel = 0;
+                    note = 'Hallucinated evidence invalidated';
+                } else if (matchCount < quotes.length) {
+                    finalLevel = Math.max(1, finalLevel - 1);
+                    note = 'Partial evidence match';
                 }
+
+                if (finalLevel > verifiedMaxLevel) {
+                    verifiedMaxLevel = finalLevel;
+                }
+
+                // Keep even level 0 if selected by AI as "closest", just verify quotes.
+                // But usually we filter invalidated. User requested "Top 5". 
+                // Let's include them but mark as verified Level 0 if invalidated.
+                validatedLitCheck.push({
+                    pmid: paper.pmid,
+                    doi: paper.doi || '',
+                    title: paper.title,
+                    url: paper.url,
+                    abstract: paper.abstract,
+                    matched_elements: ev.matched_elements || 'N/A',
+                    unmatched_elements: ev.unmatched_elements || 'N/A',
+                    difference: ev.difference || 'N/A',
+                    evidence_quotes: validQuotes,
+                    verification_note: note,
+                    verified_level: finalLevel
+                });
             }
+
             validatedLitCheck.sort((a, b) => b.verified_level - a.verified_level);
 
-            // ... (Score Calc) ...
-            let calcScore = 90, calcJudgement = 'High';
-            if (verifiedMaxLevel >= 4) { calcScore = 15; calcJudgement = 'Low'; }
-            else if (verifiedMaxLevel === 3) { calcScore = 40; calcJudgement = 'Low'; }
-            else if (verifiedMaxLevel === 2) { calcScore = 70; calcJudgement = 'Moderate'; }
-
-            // Step 7 logic (Summary)
-            let step7Result = { knowledge_gap: 'Limited comparison.', novelty_sharpeners: [] };
-            if (validatedLitCheck.length > 0) {
-                const s7Prompt = `Expert Medical Editor. STEP 7. Input verified level: ${verifiedMaxLevel}, verified papers: ${JSON.stringify(validatedLitCheck.map(p => ({ title: p.title, evidence: p.evidence_quotes })))}, case: ${JSON.stringify(preJson.reconstructed_catto)}. Output JSON { "knowledge_gap": "...", "novelty_sharpeners": ["..."] }`;
-                const s7Res = await model.generateContent({ contents: [{ role: "user", parts: [{ text: s7Prompt }] }], generationConfig: { responseMimeType: "application/json" } });
-                step7Result = extractJson(s7Res.response.text());
+            // Reconstruct Reasoning
+            let finalReasoning = evalJson.reasoning_with_ids || evalJson.reasoning || '';
+            if (finalReasoning) {
+                const replaceCallback = (match, idStr) => {
+                    const index = parseInt(idStr, 10) - 1;
+                    if (index >= 0 && index < papers.length) {
+                        const p = papers[index];
+                        return `${p.title} (PMID: ${p.pmid})`;
+                    }
+                    return `(Citation Error: Paper ID #${idStr} not found)`;
+                };
+                finalReasoning = finalReasoning.replace(/(\[|\()\s*(?:Paper|P)?\s*(\d+)\s*(\]|\))/gi, (match, open, idStr, close) => replaceCallback(match, idStr));
+                finalReasoning = finalReasoning.replace(/\b(?:Paper|P)\s*(\d+)\b/gi, (match, idStr) => replaceCallback(match, idStr));
             }
+
+            // Recalculate Judgement
+            let finalJudgement = 'Low';
+            let calcScore = 0;
+            if (verifiedMaxLevel >= 4) {
+                calcScore = 15;
+                finalJudgement = 'Low';
+            } else if (verifiedMaxLevel === 3) {
+                calcScore = 40;
+                finalJudgement = 'Low';
+            } else if (verifiedMaxLevel === 2) {
+                calcScore = 70;
+                finalJudgement = 'Moderate';
+            } else {
+                calcScore = 90;
+                finalJudgement = 'High';
+            }
+
+            // --- STEP 7: KNOWLEDGE GAP & NOVELTY SHARPENERS ---
+            console.log('Step 7: Identifying Knowledge Gaps & Novelty Sharpeners...');
+            let step7Result = {
+                knowledge_gap: '',
+                novelty_sharpeners: [],
+                knowledge_gap_notes: ''
+            };
+
+            if (validatedLitCheck.length > 0) {
+                const verifiedContext = validatedLitCheck.map(p => ({
+                    title: p.title,
+                    pmid: p.pmid,
+                    verified_level: p.verified_level,
+                    verified_evidence_quotes: p.evidence_quotes || []
+                }));
+
+                const step7Prompt = `
+You are an expert Medical Editor.
+Perform STEP 7 based on the VERIFIED analysis results.
+Output strictly in JSON format.
+
+INPUTS:
+- Verified Match Level: ${verifiedMaxLevel}
+- Validated Literature (Only trusted evidence quotes are provided):
+${JSON.stringify(verifiedContext, null, 2)}
+- Case Input Subject:
+${JSON.stringify(preJson.reconstructed_catto, null, 2)}
+
+STEP 7 TASKS:
+1. Knowledge Gap: Explain what is missing in the literature compared to this case.
+   - Base this ONLY on the provided "verified_evidence_quotes" and "verified_level".
+   - If verified_level is low (1-2), emphasize the lack of specific matching reports.
+2. Novelty Sharpeners: Suggest 5-8 specific data points or details the author should ADD to their Case Report to strengthen its novelty.
+
+OUTPUT JSON FORMAT:
+{
+  "knowledge_gap": "...",
+  "novelty_sharpeners": ["...", "..."],
+  "knowledge_gap_notes": "..." 
+}
+`;
+                try {
+                    const step7Res = await model.generateContent({
+                        contents: [{ role: "user", parts: [{ text: step7Prompt }] }],
+                        generationConfig: { responseMimeType: "application/json" }
+                    });
+                    const step7Json = extractJson(step7Res.response.text());
+                    step7Result = step7Json;
+                } catch (e) {
+                    console.error('Step 7 failed:', e);
+                    step7Result = {
+                        knowledge_gap: 'Analysis failed during Step 7.',
+                        novelty_sharpeners: [],
+                        knowledge_gap_notes: 'Error in generation.'
+                    };
+                }
+            } else {
+                step7Result = {
+                    knowledge_gap: 'No validated literature was found to be sufficiently similar.',
+                    knowledge_gap_notes: 'Determined by lack of verified matching papers.',
+                    novelty_sharpeners: ['Detailed Timeline', 'Hemodynamic data', 'Photos/Imaging', 'Follow-up']
+                };
+            }
+
 
             finalResult = {
                 ...preJson,
-                search_proposal: validatedProposal,
-                counts: { narrow: narrowCount, broad: broadCount, used: finalQueryToUse },
                 max_level_found: verifiedMaxLevel,
-                judgement: calcJudgement,
-                reasoning: evalJson.reasoning_with_ids || evalJson.reasoning || '',
+                judgement: finalJudgement,
+                reasoning: finalReasoning,
                 quick_lit_check: validatedLitCheck,
                 novelty_score: calcScore,
+                pubmed_query: preJson.pubmed_query,
                 knowledge_gap: step7Result.knowledge_gap,
-                novelty_sharpeners: step7Result.novelty_sharpeners || []
+                knowledge_gap_notes: step7Result.knowledge_gap_notes,
+                novelty_sharpeners: step7Result.novelty_sharpeners
             };
         }
 
+        // Display results
         displayResults(finalResult, formData, papers.length);
 
     } catch (error) {
-        console.error('Error:', error);
-        alert('エラー: ' + error.message);
+        console.error('Analysis Error:', error);
+        alert('エラーが発生しました: ' + error.message);
     } finally {
         btnText.textContent = 'Analyze & Send Report';
         spinner.style.display = 'none';
@@ -563,31 +706,49 @@ OUTPUT JSON FORMAT:
     }
 });
 
-function displayResults(result, formData, totalPapers) {
+function displayResults(result, formData, totalPapers = -1) {
     const results = document.getElementById('results');
+
     document.getElementById('scoreValue').textContent = result.novelty_score;
     document.getElementById('judgementBadge').textContent = result.judgement + ' Priority';
-    const badge = document.getElementById('judgementBadge');
-    if (result.judgement === 'High') badge.style.color = 'var(--secondary)';
-    else if (result.judgement === 'Moderate') badge.style.color = '#fbbf24';
-    else badge.style.color = '#f87171';
 
-    // Display Search Blocks
+    const badge = document.getElementById('judgementBadge');
+    if (result.judgement === 'High') {
+        badge.style.background = 'rgba(6, 182, 212, 0.2)';
+        badge.style.color = 'var(--secondary)';
+    } else if (result.judgement === 'Moderate') {
+        badge.style.background = 'rgba(251, 191, 36, 0.2)';
+        badge.style.color = '#fbbf24';
+    } else {
+        badge.style.background = 'rgba(239, 68, 68, 0.2)';
+        badge.style.color = '#f87171';
+    }
+
+    // 1. Case Summary (Results Top)
+    const summaryHtml = `
+    <div style="margin-bottom: 20px; padding: 15px; background: rgba(0,0,0,0.3); border-radius: 8px; border-left: 4px solid var(--secondary);">
+        <h3 style="margin-top:0; font-size: 1.1rem; color: var(--secondary);">Case Summary (Clinical Abstract)</h3>
+        <p style="margin:0; font-style: italic; color: #e2e8f0;">"${result.case_summary || 'No summary available.'}"</p>
+    </div>`;
+
+    document.getElementById('reconstructedCatto').textContent = JSON.stringify(result.reconstructed_catto, null, 2);
+    document.getElementById('searchCore').textContent = JSON.stringify(result.search_core, null, 2);
+
+    // Search Audit UI
     const proposal = result.search_proposal;
     let strategyHtml = `<div style="background: rgba(0,0,0,0.3); padding: 10px; border-radius: 8px; margin-bottom: 20px;">
         <h4 style="margin-top:0;">Search Strategy Audit</h4>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">`;
 
+    // ... Existing Strategy UI ...
     if (proposal && proposal.validated_blocks) {
         proposal.validated_blocks.forEach((block, idx) => {
             let meshBadges = '';
-            // Show Status for attempted MeSH
             for (const [term, valid] of Object.entries(block.mesh_status || {})) {
                 const color = valid ? '#4ade80' : '#f87171';
                 const icon = valid ? '✓' : '✗';
                 meshBadges += `<span style="display:inline-block; font-size:0.75rem; border:1px solid ${color}; color:${color}; padding:2px 6px; border-radius:10px; margin-right:4px;">${icon} ${term}</span>`;
             }
-            // Show Final Query part
             strategyHtml += `
             <div style="flex:1; min-width: 250px; background: rgba(255,255,255,0.05); padding:8px; border-radius:6px;">
                 <div style="font-weight:bold; font-size:0.9rem; color:var(--secondary); margin-bottom:4px;">Block ${idx + 1}: ${block.concept}</div>
@@ -599,9 +760,7 @@ function displayResults(result, formData, totalPapers) {
     strategyHtml += `</div>
         <div style="margin-top:10px; font-size:0.9rem; display:flex; justify-content:space-between; align-items:center; border-top:1px solid rgba(255,255,255,0.1); padding-top:8px;">
             <div>
-                <strong>Counts:</strong> 
-                Narrow <span style="color:#fbbf24">${result.counts?.narrow}</span> | 
-                Broad <span style="color:#fbbf24">${result.counts?.broad}</span>
+                <strong>Counts:</strong> Narrow <span style="color:#fbbf24">${result.counts?.narrow}</span> | Broad <span style="color:#fbbf24">${result.counts?.broad}</span>
             </div>
             <div>
                  Used: <span style="font-family:monospace; background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px;">${result.counts?.used === result.search_proposal.final_query ? 'Narrow' : 'Broad'}</span>
@@ -609,45 +768,67 @@ function displayResults(result, formData, totalPapers) {
         </div>
     </div>`;
 
-    document.getElementById('reconstructedCatto').textContent = JSON.stringify(result.reconstructed_catto, null, 2);
-    document.getElementById('searchCore').textContent = JSON.stringify(result.search_core, null, 2);
 
     let litCheckHtml = `<h3>Quick Literature Check (${totalPapers} papers found)</h3>` + strategyHtml;
 
-    if (totalPapers === 0) litCheckHtml += `<div style="color:#fbbf24; padding:10px;">⚠️ No papers found.</div>`;
-
-    litCheckHtml += '<ul style="list-style: none; padding: 0;">';
-    let litCheckEmailText = '';
+    if (totalPapers === 0) {
+        litCheckHtml += `<div style="background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3); padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 0.9rem; color: #fbbf24;">
+            ⚠️ PubMed query returned 0 results. No literature available for verification.
+        </div>`;
+    }
 
     if (result.quick_lit_check && result.quick_lit_check.length > 0) {
         result.quick_lit_check.forEach((cite, idx) => {
-            litCheckHtml += `<li style="margin-bottom: 10px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 8px;">
-                 <a href="${cite.url}" target="_blank" style="font-weight:bold; color:var(--secondary);">${cite.title}</a>
-                 <div style="font-size:0.8rem; color:#aaa;">PMID: ${cite.pmid} (Level ${cite.verified_level})</div>
-                 ${cite.evidence_quotes && cite.evidence_quotes.length ? `<div style="font-style:italic; font-size:0.9rem; margin-top:4px;">"${cite.evidence_quotes.join('" "')}"</div>` : ''}
-             </li>`;
-            litCheckEmailText += `[${idx + 1}] ${cite.title} (PMID:${cite.pmid})\n`;
+            const doiDisplay = cite.doi ? ` | DOI: ${cite.doi}` : '';
+            // Format quotes
+            let quotesHtml = '';
+            if (cite.evidence_quotes && cite.evidence_quotes.length > 0) {
+                quotesHtml = `<div style="margin-top: 0.5rem; font-style: italic; color: #a1a1aa; border-left: 2px solid #52525b; padding-left: 8px;">"${cite.evidence_quotes.join('"<br>"')}"</div>`;
+            }
+            // Format verification note
+            const noteHtml = cite.verification_note ? `<span style="font-size: 0.8rem; color: #fbbf24; margin-left: 5px;">(${cite.verification_note})</span>` : '';
+
+            litCheckHtml += `
+                <li style="margin-bottom: 0.75rem; padding: 0.75rem; background: rgba(0,0,0,0.2); border-radius: 8px;">
+                    <div style="font-weight: bold;">
+                        <span style="color:var(--secondary);">[#${idx + 1}]</span> <a href="${cite.url}" target="_blank" style="color: white; text-decoration: none;">${cite.title}</a>
+                        ${noteHtml}
+                    </div>
+                    <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem;">
+                       PMID: ${cite.pmid}${doiDisplay} | Match Level: ${cite.verified_level}
+                    </div>
+                    ${quotesHtml}
+                    <div style="font-size: 0.9rem; margin-top: 0.5rem;">
+                       <strong>Matched:</strong> ${cite.matched_elements}<br/>
+                       <strong>Unmatched:</strong> ${cite.unmatched_elements}<br/>
+                       <strong>Difference:</strong> ${cite.difference}
+                    </div>
+                </li>
+            `;
         });
     } else {
-        litCheckHtml += '<li>No matching verified papers.</li>';
-        litCheckEmailText += 'No verified matches.\n';
+        litCheckHtml += '<li>No specific papers listed (or all invalidated).</li>';
     }
     litCheckHtml += '</ul>';
 
-    // Knowledge Gap/Sharpeners UI
     const gapHtml = `<div style="margin:20px 0; padding:15px; background:rgba(255,255,255,0.03); border-radius:8px;">
         <h4 style="margin-top:0; color:var(--secondary)">Knowledge Gap</h4>
         <p>${result.knowledge_gap}</p>
     </div>`;
+
     const sharpHtml = `<div style="margin:20px 0; padding:15px; background:rgba(255,255,255,0.03); border-radius:8px;">
         <h4 style="margin-top:0; color:#fbbf24">Novelty Sharpeners</h4>
         <ul>${(result.novelty_sharpeners || []).map(s => `<li>${s}</li>`).join('')}</ul>
     </div>`;
 
     document.getElementById('resultContent').innerHTML = `
+        ${summaryHtml}
         <div style="margin-bottom: 1.5rem;">
             <h3>Reasoning</h3>
             <p>${result.reasoning}</p>
+            <p style="font-size: 0.9rem; color: var(--text-muted); margin-top: 5px;">
+               <em>(Score calculated based on Max Match Level: ${result.max_level_found})</em>
+            </p>
         </div>
         ${gapHtml}
         ${sharpHtml}
