@@ -740,7 +740,6 @@ function displayResults(result, formData, totalPapers = -1) {
         <h4 style="margin-top:0;">Search Strategy Audit</h4>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">`;
 
-    // ... Existing Strategy UI ...
     if (proposal && proposal.validated_blocks) {
         proposal.validated_blocks.forEach((block, idx) => {
             let meshBadges = '';
@@ -770,6 +769,7 @@ function displayResults(result, formData, totalPapers = -1) {
 
 
     let litCheckHtml = `<h3>Quick Literature Check (${totalPapers} papers found)</h3>` + strategyHtml;
+    let litCheckEmailText = '';
 
     if (totalPapers === 0) {
         litCheckHtml += `<div style="background: rgba(251, 191, 36, 0.1); border: 1px solid rgba(251, 191, 36, 0.3); padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 0.9rem; color: #fbbf24;">
@@ -778,6 +778,7 @@ function displayResults(result, formData, totalPapers = -1) {
     }
 
     if (result.quick_lit_check && result.quick_lit_check.length > 0) {
+        litCheckHtml += '<ul>'; // Start unordered list for papers
         result.quick_lit_check.forEach((cite, idx) => {
             const doiDisplay = cite.doi ? ` | DOI: ${cite.doi}` : '';
             // Format quotes
@@ -805,36 +806,82 @@ function displayResults(result, formData, totalPapers = -1) {
                     </div>
                 </li>
             `;
+            litCheckEmailText += `[${idx + 1}] ${cite.title} (PMID: ${cite.pmid}) \n`;
         });
     } else {
         litCheckHtml += '<li>No specific papers listed (or all invalidated).</li>';
+        litCheckEmailText = 'No verified matches found.\n';
     }
     litCheckHtml += '</ul>';
 
-    const gapHtml = `<div style="margin:20px 0; padding:15px; background:rgba(255,255,255,0.03); border-radius:8px;">
+    const gapHtml = `< div style = "margin:20px 0; padding:15px; background:rgba(255,255,255,0.03); border-radius:8px;" >
         <h4 style="margin-top:0; color:var(--secondary)">Knowledge Gap</h4>
         <p>${result.knowledge_gap}</p>
-    </div>`;
+    </div > `;
 
-    const sharpHtml = `<div style="margin:20px 0; padding:15px; background:rgba(255,255,255,0.03); border-radius:8px;">
+    const sharpHtml = `< div style = "margin:20px 0; padding:15px; background:rgba(255,255,255,0.03); border-radius:8px;" >
         <h4 style="margin-top:0; color:#fbbf24">Novelty Sharpeners</h4>
         <ul>${(result.novelty_sharpeners || []).map(s => `<li>${s}</li>`).join('')}</ul>
-    </div>`;
+    </div > `;
 
     document.getElementById('resultContent').innerHTML = `
         ${summaryHtml}
-        <div style="margin-bottom: 1.5rem;">
-            <h3>Reasoning</h3>
-            <p>${result.reasoning}</p>
-            <p style="font-size: 0.9rem; color: var(--text-muted); margin-top: 5px;">
-               <em>(Score calculated based on Max Match Level: ${result.max_level_found})</em>
-            </p>
-        </div>
+            <div style="margin-bottom: 1.5rem;">
+                <h3>Reasoning</h3>
+                <p>${result.reasoning}</p>
+                <p style="font-size: 0.9rem; color: var(--text-muted); margin-top: 5px;">
+                    <em>(Score calculated based on Max Match Level: ${result.max_level_found})</em>
+                </p>
+            </div>
         ${gapHtml}
         ${sharpHtml}
         ${litCheckHtml}
-    `;
+            `;
+
+    // --- Email Button Logic ---
+    const emailBody = `Subject: Case Report Novelty Analysis Request
+
+            [Case Summary]
+${result.case_summary || 'N/A'}
+
+            [Novelty Score]
+            Score: ${result.novelty_score}
+            Judgement: ${result.judgement} Priority
+
+            [Reasoning]
+${result.reasoning}
+
+            [Knowledge Gap]
+${result.knowledge_gap}
+
+            [Novelty Sharpeners]
+${(result.novelty_sharpeners || []).map(s => '- ' + s).join('\n')}
+
+            [Quick Literature Check]
+${litCheckEmailText}
+
+            [Original Input]
+            Condition: ${formData.condition_event}
+            Anatomy: ${formData.anatomy}
+            Trigger: ${formData.trigger_exposure}
+            Timing: ${formData.timing}
+Key Findings: ${formData.key_findings}
+            Management: ${formData.management_outcome}
+Novelty Claim: ${formData.novelty_differences}
+            `;
+
+    const mailtoLink = `mailto:? subject = ${encodeURIComponent('Case Report Analysis Result')}& body=${encodeURIComponent(emailBody)} `;
+
+    const emailBtnHtml = `
+                < div style = "margin-top: 30px; text-align: center;" >
+                    <a href="${mailtoLink}" class="btn" style="background: var(--secondary); color: black; text-decoration: none; display: inline-block; padding: 10px 20px; border-radius: 6px; font-weight: bold;">
+                        Open Email Draft
+                    </a>
+    </div > `;
+
+    document.getElementById('resultContent').insertAdjacentHTML('beforeend', emailBtnHtml);
 
     results.style.display = 'block';
     results.scrollIntoView({ behavior: 'smooth' });
+}
 }
